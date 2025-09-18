@@ -23,7 +23,7 @@ sudo apt-get install -y docker-compose-plugin git curl
 # جلب الكود (تقدر تغيّر رابط الريبو لرابطك الخاص)
 APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
 if [ ! -d "$APP_DIR" ]; then
-    git clone https://github.com/<username>/<repo>.git $APP_DIR
+    git clone https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git $APP_DIR
 else
     cd $APP_DIR
     git pull origin main
