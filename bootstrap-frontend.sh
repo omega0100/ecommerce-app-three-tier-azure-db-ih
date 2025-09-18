@@ -1,31 +1,26 @@
 #!/bin/bash
 set -euxo pipefail
+APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
+BRANCH="main"
 
 sudo apt-get update -y
 sudo systemctl unmask docker.service || true
 sudo systemctl unmask docker.socket || true
-sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
-curl -fsSL https://get.docker.com | sh
-sudo systemctl daemon-reexec
-sudo systemctl daemon-reload
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo usermod -aG docker azureuser || true
-
+command -v docker || { curl -fsSL https://get.docker.com | sh; }
+sudo systemctl enable --now docker
 sudo apt-get install -y docker-compose-plugin git curl
 
-APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
-if [ ! -d "$APP_DIR" ]; then
-  sudo -u azureuser git clone https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git "$APP_DIR"
+if [ ! -d "$APP_DIR/.git" ]; then
+  sudo rm -rf "$APP_DIR"
+  sudo -H -u azureuser git clone --branch "$BRANCH" https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git "$APP_DIR"
 else
-  cd "$APP_DIR"
-  sudo -u azureuser git pull --rebase
+  sudo -H -u azureuser bash -lc "cd '$APP_DIR' && git fetch --all --prune && git reset --hard origin/$BRANCH"
 fi
+sudo chown -R azureuser:azureuser "$APP_DIR"
 
-# REACT_APP_API_URL لو عندكم يعتمد على IP الـ AppGW، تأكدوا إنه مضبوط داخل الـ Dockerfile/NGINX أو .env الخاصة بالفرونت
 cd "$APP_DIR"
 sudo docker compose pull || true
 sudo docker compose up -d --build frontend
 
 sleep 5
-curl -sf http://localhost/ || exit 1
+curl -sf http://localhost/ || exit 53
