@@ -4,7 +4,7 @@ set -euxo pipefail
 # 1) تحديث
 sudo apt-get update -y
 
-# 2) تثبيت/تصليح Docker
+# 2) تصليح/تثبيت Docker
 sudo systemctl unmask docker.service || true
 sudo systemctl unmask docker.socket || true
 sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
@@ -18,16 +18,24 @@ sudo usermod -aG docker azureuser || true
 # 3) أدوات
 sudo apt-get install -y docker-compose-plugin git curl
 
-# 4) جلب الكود (عدّل الرابط لريبوك)
+# 4) جلب/تحديث الكود بدون ما نكسر .env
 APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
-if [ ! -d "$APP_DIR" ]; then
-  sudo -u azureuser git clone https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git "$APP_DIR"
+REPO_URL="https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git"   # عدّل هذا
+
+# اجعل Git يتجاهل تحذير "unsafe repository" لو تغيرت الملكية
+sudo -u azureuser git config --global safe.directory '*'
+
+if [ ! -d "$APP_DIR/.git" ]; then
+  sudo rm -rf "$APP_DIR" || true
+  sudo -u azureuser git clone "$REPO_URL" "$APP_DIR"
 else
   cd "$APP_DIR"
-  sudo -u azureuser git pull --rebase
+  sudo -u azureuser git fetch --all --prune
+  # يمسح تعديلات الملفات المتتبعة فقط ويترك .env (غير متتبعة وموجودة بـ .gitignore)
+  sudo -u azureuser git reset --hard origin/main
 fi
 
-# 5) .env للباك-إند (اختياري لو مو موجود)
+# 5) تأكد من وجود .env للباك-إند (لا تكتب عليه لو موجود)
 cd "$APP_DIR/ecommerce-app-backend"
 if [ ! -f ".env" ]; then
   cat > .env <<'EOF'
@@ -47,11 +55,11 @@ EOF
   chown azureuser:azureuser .env
 fi
 
-# 6) شغل خدمة الباك-إند فقط من الـ compose
+# 6) تشغيل خدمة backend فقط
 cd "$APP_DIR"
 sudo docker compose pull || true
 sudo docker compose up -d --build backend
 
-# 7) تأكيد الصحّة
+# 7) فحص صحّة
 sleep 5
 curl -sf http://localhost:3001/health || exit 1
