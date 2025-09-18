@@ -19,8 +19,9 @@ fi
 sudo chown -R azureuser:azureuser "$APP_DIR"
 
 cd "$APP_DIR"
-sudo docker compose pull || true
-sudo docker compose up -d --build frontend
+# ابنِ وشغّل خدمة الفرونت فقط بدون أي تبعيات
+sudo docker compose up -d --no-deps --build frontend
 
+# افحص على البورت 3000 (زي ما HealthExtension عندك)
 sleep 5
-curl -sf http://localhost/ || exit 53
+curl -sf http://localhost:3000/ || exit 53
