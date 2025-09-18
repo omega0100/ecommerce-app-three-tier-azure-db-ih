@@ -1,18 +1,19 @@
 #!/bin/bash
 set -euxo pipefail
 
-# ==== 0) ثوابت ====
+# اشتغل في مسار آمن بعيد عن waagent
+cd /tmp
+
 APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
 REPO_URL="https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git"
-BRANCH="main"   # غيّرها لو فرعك غير
+BRANCH="main"
 
-# ==== 1) تحديث النظام ====
+# 1) تحديث الحزم
 sudo apt-get update -y
 
-# ==== 2) Docker ====
+# 2) تثبيت/تشغيل Docker (بدون إزالة وإعادة تثبيت إذا كان موجود)
 sudo systemctl unmask docker.service || true
 sudo systemctl unmask docker.socket || true
-# لا نحذف Docker كل مرة؛ فقط نثبته لو مهو موجود
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
   sudo systemctl daemon-reexec
@@ -25,21 +26,19 @@ else
   sudo systemctl start docker || true
 fi
 
-# أدوات لازمة
+# أدوات
 sudo apt-get install -y docker-compose-plugin git curl
 
-# ==== 3) جلب/تحديث الكود كـ azureuser ====
+# 3) جلب/تحديث الكود كـ azureuser بدون لمس .env
 if [ ! -d "$APP_DIR/.git" ]; then
   sudo rm -rf "$APP_DIR" || true
   sudo -H -u azureuser bash -lc "git clone --depth 1 -b $BRANCH '$REPO_URL' '$APP_DIR'"
 else
   sudo -H -u azureuser bash -lc "cd '$APP_DIR' && git fetch --all --prune && git reset --hard origin/$BRANCH"
 fi
-
-# تأكد الملكية للمجلد
 sudo chown -R azureuser:azureuser "$APP_DIR"
 
-# ==== 4) .env للباك اند (لا نكتب لو موجود) ====
+# 4) .env للباك-إند (إن لم يوجد فقط)
 BACKEND_ENV="$APP_DIR/ecommerce-app-backend/.env"
 if [ ! -f "$BACKEND_ENV" ]; then
   cat > "$BACKEND_ENV" <<'EOF'
@@ -59,12 +58,11 @@ EOF
   sudo chown azureuser:azureuser "$BACKEND_ENV"
 fi
 
-# ==== 5) تشغيل backend فقط ====
+# 5) تشغيل backend فقط
 cd "$APP_DIR"
-# نبقي docker كـ root لضمان الصلاحيات
 sudo docker compose pull || true
 sudo docker compose up -d --build backend
 
-# ==== 6) فحص الصحة ====
+# 6) فحص الصحة
 sleep 5
 curl -sf http://localhost:3001/health
