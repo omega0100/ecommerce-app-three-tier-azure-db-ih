@@ -1,44 +1,48 @@
 #!/bin/bash
 set -euxo pipefail
 
-# 1) تحديث
+# ==== 0) ثوابت ====
+APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
+REPO_URL="https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git"
+BRANCH="main"   # غيّرها لو فرعك غير
+
+# ==== 1) تحديث النظام ====
 sudo apt-get update -y
 
-# 2) تصليح/تثبيت Docker
+# ==== 2) Docker ====
 sudo systemctl unmask docker.service || true
 sudo systemctl unmask docker.socket || true
-sudo apt-get remove -y docker docker-engine docker.io containerd runc containerd.io || true
-curl -fsSL https://get.docker.com | sh
-sudo systemctl daemon-reexec
-sudo systemctl daemon-reload
-sudo systemctl enable docker
-sudo systemctl start docker
-sudo usermod -aG docker azureuser || true
-
-# 3) أدوات
-sudo apt-get install -y docker-compose-plugin git curl
-
-# 4) جلب/تحديث الكود بدون ما نكسر .env
-APP_DIR="/home/azureuser/ecommerce-app-three-tier-azure-db-ih"
-REPO_URL="https://github.com/omega0100/ecommerce-app-three-tier-azure-db-ih.git"   # عدّل هذا
-
-# اجعل Git يتجاهل تحذير "unsafe repository" لو تغيرت الملكية
-sudo -u azureuser git config --global safe.directory '*'
-
-if [ ! -d "$APP_DIR/.git" ]; then
-  sudo rm -rf "$APP_DIR" || true
-  sudo -u azureuser git clone "$REPO_URL" "$APP_DIR"
+# لا نحذف Docker كل مرة؛ فقط نثبته لو مهو موجود
+if ! command -v docker >/dev/null 2>&1; then
+  curl -fsSL https://get.docker.com | sh
+  sudo systemctl daemon-reexec
+  sudo systemctl daemon-reload
+  sudo systemctl enable docker
+  sudo systemctl start docker
+  sudo usermod -aG docker azureuser || true
 else
-  cd "$APP_DIR"
-  sudo -u azureuser git fetch --all --prune
-  # يمسح تعديلات الملفات المتتبعة فقط ويترك .env (غير متتبعة وموجودة بـ .gitignore)
-  sudo -u azureuser git reset --hard origin/main
+  sudo systemctl enable docker || true
+  sudo systemctl start docker || true
 fi
 
-# 5) تأكد من وجود .env للباك-إند (لا تكتب عليه لو موجود)
-cd "$APP_DIR/ecommerce-app-backend"
-if [ ! -f ".env" ]; then
-  cat > .env <<'EOF'
+# أدوات لازمة
+sudo apt-get install -y docker-compose-plugin git curl
+
+# ==== 3) جلب/تحديث الكود كـ azureuser ====
+if [ ! -d "$APP_DIR/.git" ]; then
+  sudo rm -rf "$APP_DIR" || true
+  sudo -H -u azureuser bash -lc "git clone --depth 1 -b $BRANCH '$REPO_URL' '$APP_DIR'"
+else
+  sudo -H -u azureuser bash -lc "cd '$APP_DIR' && git fetch --all --prune && git reset --hard origin/$BRANCH"
+fi
+
+# تأكد الملكية للمجلد
+sudo chown -R azureuser:azureuser "$APP_DIR"
+
+# ==== 4) .env للباك اند (لا نكتب لو موجود) ====
+BACKEND_ENV="$APP_DIR/ecommerce-app-backend/.env"
+if [ ! -f "$BACKEND_ENV" ]; then
+  cat > "$BACKEND_ENV" <<'EOF'
 PORT=3001
 NODE_ENV=production
 DB_SERVER=sqlserver-group4.database.windows.net
@@ -52,14 +56,15 @@ JWT_SECRET=Group4
 JWT_EXPIRES_IN=7d
 CORS_ORIGIN=http://4.245.59.253:3000
 EOF
-  chown azureuser:azureuser .env
+  sudo chown azureuser:azureuser "$BACKEND_ENV"
 fi
 
-# 6) تشغيل خدمة backend فقط
+# ==== 5) تشغيل backend فقط ====
 cd "$APP_DIR"
+# نبقي docker كـ root لضمان الصلاحيات
 sudo docker compose pull || true
 sudo docker compose up -d --build backend
 
-# 7) فحص صحّة
+# ==== 6) فحص الصحة ====
 sleep 5
-curl -sf http://localhost:3001/health || exit 1
+curl -sf http://localhost:3001/health
