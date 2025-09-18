@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   # Backend API
   backend:
@@ -18,10 +20,10 @@ services:
       - DB_TRUST_SERVER_CERTIFICATE=false
       - JWT_SECRET=${JWT_SECRET}
       - JWT_EXPIRES_IN=7d
-      - CORS_ORIGIN=http://localhost:3000
+      - CORS_ORIGIN=http://4.245.59.253
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "healthcheck.js"]
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -36,7 +38,7 @@ services:
     ports:
       - "3000:80"
     environment:
-      - REACT_APP_API_URL=http://localhost:3001/api
+      - REACT_APP_API_URL=http://4.245.59.253/api 
     depends_on:
       - backend
     restart: unless-stopped
@@ -50,3 +52,4 @@ services:
 networks:
   default:
     name: ecommerce-network
+
