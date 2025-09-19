@@ -1,27 +1,30 @@
-# Use Node.js 18 Alpine as base image
-FROM node:18-alpine
-
-# Set working directory
+# --------- build stage ---------
+FROM node:20-alpine AS build
 WORKDIR /app
 
-# Copy package files
+# تثبيت كل الحزم (بما فيها dev مثل typescript)
 COPY package*.json ./
+RUN npm ci
 
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy source code
+# نسخ السورس وبناء TypeScript
 COPY . .
-
-# Build the application
 RUN npm run build
 
-# Expose port
+# تحضير node_modules للبرودكشن فقط
+RUN npm ci --only=production && npm cache clean --force
+
+# --------- runtime stage ---------
+FROM node:20-alpine
+ENV NODE_ENV=production
+WORKDIR /app
+
+# ننسخ فقط ما نحتاجه للتشغيل
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY package*.json ./
+
 EXPOSE 3001
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD node healthcheck.js
-
-# Start the application
-CMD ["npm", "start"]
+# شغّل حسب سكربتاتك (اختَر واحدة حسب package.json لديك)
+CMD ["node","dist/server.js"]
+# أو:
+# CMD ["npm","run","start"]
