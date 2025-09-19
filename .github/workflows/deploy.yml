@@ -58,21 +58,22 @@ jobs:
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-      # ===== Backend VMSS: لف على كل إنستانس بالـ ID الكامل واستخدم vm run-command =====
+      # ===== Backend VMSS: loop with numeric instanceId =====
       - name: Update VMSS Backend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].id" -o tsv)
-          if [ -z "${VM_IDS}" ]; then
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
             echo "No instances found in $VMSS_BE — skipping."
             exit 0
           fi
-          for VMID in $VM_IDS; do
-            echo "Updating backend on $VMID ..."
-            az vmss vm run-command invoke \
-              --ids "$VMID" \
+          for id in $IDS; do
+            echo "Updating backend instanceId=$id ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_BE" \
               --command-id RunShellScript \
+              --instance-id "$id" \
               --scripts '
                 set -e
                 cd '"$APP_DIR"'
@@ -85,21 +86,22 @@ jobs:
               ' > /dev/null
           done
 
-      # ===== Frontend VMSS: نفس المبدأ =====
+      # ===== Frontend VMSS: loop with numeric instanceId =====
       - name: Update VMSS Frontend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].id" -o tsv)
-          if [ -z "${VM_IDS}" ]; then
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
             echo "No instances found in $VMSS_FE — skipping."
             exit 0
           fi
-          for VMID in $VM_IDS; do
-            echo "Updating frontend on $VMID ..."
-            az vmss vm run-command invoke \
-              --ids "$VMID" \
+          for id in $IDS; do
+            echo "Updating frontend instanceId=$id ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_FE" \
               --command-id RunShellScript \
+              --instance-id "$id" \
               --scripts '
                 set -e
                 cd '"$APP_DIR"'
