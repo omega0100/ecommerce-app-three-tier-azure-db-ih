@@ -1,0 +1,70 @@
+name: Build and Deploy to ACR
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  ACR_NAME: group4acr
+  ACR_LOGIN_SERVER: group4acr.azurecr.io
+  RG: RG-group4
+  VMSS_BE: vmss-backend-group4
+  VMSS_FE: vmss-frontend-group4
+  APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Checkout
+      - uses: actions/checkout@v4
+
+      # 2) Login to Azure (باستخدام سكريت واحد AZURE_CREDENTIALS)
+      - name: Azure CLI Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # 3) Login to ACR (يحتاج له Role AcrPush على ACR)
+      - name: ACR Login
+        run: az acr login --name $ACR_NAME
+
+      # 4) Build & Push Backend
+      - name: Build and Push Backend
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/ecommerce-backend:latest ./ecommerce-app-backend
+          docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
+
+      # 5) Build & Push Frontend
+      - name: Build and Push Frontend
+        run: |
+          docker build -t $ACR_LOGIN_SERVER/ecommerce-frontend:latest ./ecommerce-app-frontend
+          docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+
+      # 6) تحديث كل إنستانس: سحب الصور وتشغيلها (Backend)
+      - name: Update VMSS Backend (pull & restart)
+        run: |
+          az vmss run-command invoke -g $RG -n $VMSS_BE --command-id RunShellScript --scripts "
+          set -e
+          cd $APP_DIR
+          az login --identity
+          TOKEN=\$(az acr login --name $ACR_NAME --expose-token --query accessToken -o tsv)
+          echo \$TOKEN | docker login $ACR_LOGIN_SERVER -u 00000000-0000-0000-0000-000000000000 --password-stdin
+          docker compose pull backend
+          docker compose up -d --no-deps backend
+          docker image prune -f
+          "
+
+      # 7) تحديث كل إنستانس: سحب الصور وتشغيلها (Frontend)
+      - name: Update VMSS Frontend (pull & restart)
+        run: |
+          az vmss run-command invoke -g $RG -n $VMSS_FE --command-id RunShellScript --scripts "
+          set -e
+          cd $APP_DIR
+          az login --identity
+          TOKEN=\$(az acr login --name $ACR_NAME --expose-token --query accessToken -o tsv)
+          echo \$TOKEN | docker login $ACR_LOGIN_SERVER -u 00000000-0000-0000-0000-000000000000 --password-stdin
+          docker compose pull frontend
+          docker compose up -d --no-deps frontend
+          docker image prune -f
+          "
