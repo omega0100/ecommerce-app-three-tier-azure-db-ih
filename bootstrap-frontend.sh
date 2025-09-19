@@ -20,7 +20,8 @@ sudo chown -R azureuser:azureuser "$APP_DIR"
 
 cd "$APP_DIR"
 # ابنِ وشغّل خدمة الفرونت فقط بدون أي تبعيات
-sudo docker compose up -d --no-deps --build frontend
+sudo docker compose build --no-cache frontend
+sudo docker compose up -d --no-deps --force-recreate frontend
 
 # افحص على البورت 3000 (زي ما HealthExtension عندك)
 sleep 5
