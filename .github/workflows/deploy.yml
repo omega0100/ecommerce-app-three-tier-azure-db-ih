@@ -5,12 +5,10 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-# قيود منع تداخل تشغيل نفس البايبلاين
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
-# متغيّرات عامة
 env:
   ACR_NAME: group4acr
   ACR_LOGIN_SERVER: group4acr.azurecr.io
@@ -22,82 +20,96 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    # إن كنت تستخدم azure/login مع OIDC أضف الصلاحيات التالية؛
-    # لو تستخدم Secret AZURE_CREDENTIALS فقط، لا تضر:
     permissions:
       id-token: write
       contents: read
 
     steps:
-      # 1) Checkout
       - uses: actions/checkout@v4
 
-      # 2) تسجيل دخول Azure (بـ Secret واحد AZURE_CREDENTIALS)
       - name: Azure CLI Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # 3) تسجيل دخول Docker إلى ACR
       - name: ACR Login
         run: az acr login --name "$ACR_NAME"
 
-      # (اختياري) تفعيل Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 4) Build & Push Backend (نوسم latest + commit SHA)
+      # Build & push backend
       - name: Build and Push Backend
         run: |
           set -euo pipefail
-          BACKEND_TAG_SHA=${{ github.sha }}
-          docker build -t $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG_SHA} ./ecommerce-app-backend
-          docker tag $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG_SHA} $ACR_LOGIN_SERVER/ecommerce-backend:latest
-          docker push $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG_SHA}
+          BACKEND_TAG=${{ github.sha }}
+          docker build -t $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} ./ecommerce-app-backend
+          docker tag $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} $ACR_LOGIN_SERVER/ecommerce-backend:latest
+          docker push $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
 
-      # 5) Build & Push Frontend (نفس الفكرة)
+      # Build & push frontend
       - name: Build and Push Frontend
         run: |
           set -euo pipefail
-          FRONTEND_TAG_SHA=${{ github.sha }}
-          docker build -t $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG_SHA} ./ecommerce-app-frontend
-          docker tag $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG_SHA} $ACR_LOGIN_SERVER/ecommerce-frontend:latest
-          docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG_SHA}
+          FRONTEND_TAG=${{ github.sha }}
+          docker build -t $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} ./ecommerce-app-frontend
+          docker tag $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+          docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-      # 6) تحديث إنستانسات الـ Backend: سحب الصور وتشغيلها
-      - name: Update VMSS Backend (pull & restart)
+      # ===== Loop لكل إنستانس في Backend VMSS =====
+      - name: Update VMSS Backend (loop all instances)
+        shell: bash
         run: |
-          az vmss run-command invoke \
-            -g "$RG" -n "$VMSS_BE" \
-            --command-id RunShellScript \
-            --instance-id "*" \
-            --scripts '
-              set -e
-              cd '"$APP_DIR"'
-              az login --identity
-              TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
-              echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
-              docker compose pull backend
-              docker compose up -d --no-deps backend
-              docker image prune -f
-            '
+          set -euo pipefail
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
+            echo "No instances found in $VMSS_BE — skipping."
+            exit 0
+          fi
+          for id in $IDS; do
+            echo "Updating $VMSS_BE instance $id ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_BE" \
+              --command-id RunShellScript \
+              --instance-id "$id" \
+              --scripts '
+                set -e
+                cd '"$APP_DIR"'
+                az login --identity
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                docker compose pull backend
+                docker compose up -d --no-deps backend
+                docker image prune -f
+              ' > /dev/null
+          done
 
-      # 7) تحديث إنستانسات الـ Frontend: سحب الصور وتشغيلها
-      - name: Update VMSS Frontend (pull & restart)
+      # ===== Loop لكل إنستانس في Frontend VMSS =====
+      - name: Update VMSS Frontend (loop all instances)
+        shell: bash
         run: |
-          az vmss run-command invoke \
-            -g "$RG" -n "$VMSS_FE" \
-            --command-id RunShellScript \
-            --instance-id "*" \
-            --scripts '
-              set -e
-              cd '"$APP_DIR"'
-              az login --identity
-              TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
-              echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
-              docker compose pull frontend
-              docker compose up -d --no-deps frontend
-              docker image prune -f
-            '
+          set -euo pipefail
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
+            echo "No instances found in $VMSS_FE — skipping."
+            exit 0
+          fi
+          for id in $IDS; do
+            echo "Updating $VMSS_FE instance $id ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_FE" \
+              --command-id RunShellScript \
+              --instance-id "$id" \
+              --scripts '
+                set -e
+                cd '"$APP_DIR"'
+                az login --identity
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                docker compose pull frontend
+                docker compose up -d --no-deps frontend
+                docker image prune -f
+              ' > /dev/null
+          done
