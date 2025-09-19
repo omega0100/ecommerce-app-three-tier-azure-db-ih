@@ -33,7 +33,7 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: ACR Login
-        run: az acr login --name "$ACR_NAME"
+        run: az acr login --name "$ACR_NAME" --only-show-errors
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           BACKEND_TAG=${{ github.sha }}
           docker build -t $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} ./ecommerce-app-backend
-          docker tag $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} $ACR_LOGIN_SERVER/ecommerce-backend:latest
+          docker tag  $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} $ACR_LOGIN_SERVER/ecommerce-backend:latest
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
 
@@ -54,26 +54,25 @@ jobs:
           set -euo pipefail
           FRONTEND_TAG=${{ github.sha }}
           docker build -t $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} ./ecommerce-app-frontend
-          docker tag $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+          docker tag  $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} $ACR_LOGIN_SERVER/ecommerce-frontend:latest
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-      # ===== Loop لكل إنستانس في Backend VMSS =====
+      # ===== Backend VMSS: لف على كل إنستانس بالـ ID الكامل واستخدم vm run-command =====
       - name: Update VMSS Backend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
-          if [ -z "${IDS}" ]; then
+          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].id" -o tsv)
+          if [ -z "${VM_IDS}" ]; then
             echo "No instances found in $VMSS_BE — skipping."
             exit 0
           fi
-          for id in $IDS; do
-            echo "Updating $VMSS_BE instance $id ..."
-            az vmss run-command invoke \
-              -g "$RG" -n "$VMSS_BE" \
+          for VMID in $VM_IDS; do
+            echo "Updating backend on $VMID ..."
+            az vmss vm run-command invoke \
+              --ids "$VMID" \
               --command-id RunShellScript \
-              --instance-id "$id" \
               --scripts '
                 set -e
                 cd '"$APP_DIR"'
@@ -86,22 +85,21 @@ jobs:
               ' > /dev/null
           done
 
-      # ===== Loop لكل إنستانس في Frontend VMSS =====
+      # ===== Frontend VMSS: نفس المبدأ =====
       - name: Update VMSS Frontend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
-          if [ -z "${IDS}" ]; then
+          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].id" -o tsv)
+          if [ -z "${VM_IDS}" ]; then
             echo "No instances found in $VMSS_FE — skipping."
             exit 0
           fi
-          for id in $IDS; do
-            echo "Updating $VMSS_FE instance $id ..."
-            az vmss run-command invoke \
-              -g "$RG" -n "$VMSS_FE" \
+          for VMID in $VM_IDS; do
+            echo "Updating frontend on $VMID ..."
+            az vmss vm run-command invoke \
+              --ids "$VMID" \
               --command-id RunShellScript \
-              --instance-id "$id" \
               --scripts '
                 set -e
                 cd '"$APP_DIR"'
