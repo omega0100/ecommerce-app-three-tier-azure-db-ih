@@ -5,6 +5,8 @@ import { useAuthStore } from './store/authStore';
 import { useCartStore } from './store/cartStore';
 import { authAPI } from './services/api';
 import Header from './components/Header';
+
+// E-commerce pages
 import Home from './pages/Home';
 import Login from './pages/Login';
 import Register from './pages/Register';
@@ -14,6 +16,9 @@ import Cart from './pages/Cart';
 import Orders from './pages/Orders';
 import Profile from './pages/Profile';
 import ProtectedRoute from './components/ProtectedRoute';
+
+// Group 4 page (only GroupHome)
+import GroupHome from './pages/GroupHome';
 
 const App: React.FC = () => {
   const { user, isAuthenticated, updateUser } = useAuthStore();
@@ -48,7 +53,11 @@ const App: React.FC = () => {
         <Header />
         <main>
           <Routes>
-            <Route path="/" element={<Home />} />
+            {/* Group 4 main page */}
+            <Route path="/" element={<GroupHome />} />
+
+            {/* E-commerce pages */}
+            <Route path="/shop" element={<Home />} />
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />
             <Route path="/products" element={<Products />} />
