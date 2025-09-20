@@ -21,10 +21,13 @@ env:
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
 jobs:
+  # ========= build =========
   build:
     name: Build & Push images to ACR
     runs-on: ubuntu-latest
-    permissions: { id-token: write, contents: read }
+    permissions:
+      id-token: write
+      contents: read
     outputs:
       RAW_URL: ${{ steps.compose.outputs.RAW_URL }}
       TAG: ${{ steps.tag.outputs.TAG }}
@@ -42,7 +45,7 @@ jobs:
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Set TAG
+      - name: Set TAG (commit SHA)
         id: tag
         run: echo "TAG=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
@@ -70,15 +73,19 @@ jobs:
       - name: Prepare RAW compose URL
         id: compose
         run: |
+          set -euo pipefail
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
           echo "Using compose: $RAW"
 
+  # ========= deploy backend =========
   deploy-backend:
     name: Deploy Backend (rolling + health)
     runs-on: ubuntu-latest
     needs: build
-    permissions: { id-token: write, contents: read }
+    permissions:
+      id-token: write
+      contents: read
     env:
       RAW_URL: ${{ needs.build.outputs.RAW_URL }}
       TAG: ${{ needs.build.outputs.TAG }}
@@ -88,64 +95,77 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Update VMSS Backend
+      - name: Update VMSS Backend (instance-by-instance)
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
 
+          # سكربت يُشغَّل على كل VM (نمرّر المتغيرات كـ parameters)
+          cat > vm-backend.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          APP_DIR="$1"
+          ACR_NAME="$2"
+          ACR_LOGIN_SERVER="$3"
+          RAW_URL="$4"
+          IMAGE_TAG="$5"
+          HEALTH_URL="$6"
+
+          # تأكد من توفر docker compose (plugin أو classic)
+          if ! docker compose version >/dev/null 2>&1; then
+            if ! command -v docker-compose >/dev/null 2>&1; then
+              sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose || true
+            fi
+          fi
+
+          mkdir -p "$APP_DIR" && cd "$APP_DIR"
+          curl -fsSL "$RAW_URL" -o docker-compose.yml
+          printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
+
+          az login --identity
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+          if docker compose version >/dev/null 2>&1; then
+            docker compose --env-file .env pull backend
+            docker compose --env-file .env up -d --no-deps --force-recreate backend
+          else
+            docker-compose --env-file .env pull backend
+            docker-compose --env-file .env up -d --no-deps --force-recreate backend
+          fi
+
+          # انتظر الصحة (حد أقصى 3 دقائق)
+          for i in $(seq 1 36); do
+            curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
+            sleep 5
+          done
+          echo "Backend failed healthcheck"
+          docker ps --filter name=ecommerce-backend
+          docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
+          exit 1
+          SCRIPT
+          chmod +x vm-backend.sh
+
           for VM in "${NAMES[@]}"; do
             echo ">>> BACKEND on $VM"
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts '
-set -euo pipefail
-APP_DIR="'"$APP_DIR"'"
-ACR_NAME="'"$ACR_NAME"'"
-ACR_LOGIN_SERVER="'"$ACR_LOGIN_SERVER"'"
-RAW_URL="'"$RAW_URL"'"
-IMAGE_TAG="'"$TAG"'"
-BE_HEALTH_URL="'"$BE_HEALTH_URL"'"
-
-# Ensure docker compose present (plugin or classic)
-if ! docker compose version >/dev/null 2>&1; then
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose || true
-  fi
-fi
-
-mkdir -p "$APP_DIR" && cd "$APP_DIR"
-curl -fsSL "$RAW_URL" -o docker-compose.yml
-printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
-
-az login --identity
-TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
-echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
-
-if docker compose version >/dev/null 2>&1; then
-  docker compose --env-file .env pull backend
-  docker compose --env-file .env up -d --no-deps --force-recreate backend
-else
-  docker-compose --env-file .env pull backend
-  docker-compose --env-file .env up -d --no-deps --force-recreate backend
-fi
-
-for i in $(seq 1 36); do
-  curl -fsS "$BE_HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
-  sleep 5
-done
-echo "Backend failed healthcheck"
-docker ps --filter name=ecommerce-backend
-docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
-exit 1
-' >/dev/null
+            az vm run-command invoke -g "$RG" -n "$VM" \
+              --command-id RunShellScript \
+              --scripts @vm-backend.sh \
+              --parameters "$APP_DIR" "$ACR_NAME" "$ACR_LOGIN_SERVER" "$RAW_URL" "$TAG" "$BE_HEALTH_URL" \
+              >/dev/null
           done
 
+  # ========= deploy frontend =========
   deploy-frontend:
     name: Deploy Frontend (rolling + health)
     runs-on: ubuntu-latest
     needs: deploy-backend
-    permissions: { id-token: write, contents: read }
+    permissions:
+      id-token: write
+      contents: read
     env:
       RAW_URL: ${{ needs.build.outputs.RAW_URL }}
       TAG: ${{ needs.build.outputs.TAG }}
@@ -155,60 +175,69 @@ exit 1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Update VMSS Frontend
+      - name: Update VMSS Frontend (instance-by-instance)
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
 
+          cat > vm-frontend.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          APP_DIR="$1"
+          ACR_NAME="$2"
+          ACR_LOGIN_SERVER="$3"
+          RAW_URL="$4"
+          IMAGE_TAG="$5"
+          HEALTH_URL="$6"
+
+          if ! docker compose version >/dev/null 2>&1; then
+            if ! command -v docker-compose >/dev/null 2>&1; then
+              sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose || true
+            fi
+          fi
+
+          mkdir -p "$APP_DIR" && cd "$APP_DIR"
+          curl -fsSL "$RAW_URL" -o docker-compose.yml
+          printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
+
+          az login --identity
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+          if docker compose version >/dev/null 2>&1; then
+            docker compose --env-file .env pull frontend
+            docker compose --env-file .env up -d --no-deps --force-recreate frontend
+          else
+            docker-compose --env-file .env pull frontend
+            docker-compose --env-file .env up -d --no-deps --force-recreate frontend
+          fi
+
+          for i in $(seq 1 36); do
+            if curl -fsS "$HEALTH_URL" >/dev/null; then
+              # طباعة النسخة وملفات الـ CSS للمقارنة بين الـ VMs
+              echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
+              echo "--- css files ---"; ls -l /usr/share/nginx/html/static/css || true
+              echo "--- index references ---"; grep -o "/static/css/[^\" ]*\\.css" -n /usr/share/nginx/html/index.html || true
+              echo "Frontend healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Frontend failed healthcheck"
+          docker ps --filter name=ecommerce-frontend
+          docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
+          exit 1
+          SCRIPT
+          chmod +x vm-frontend.sh
+
           for VM in "${NAMES[@]}"; do
             echo ">>> FRONTEND on $VM"
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts '
-set -euo pipefail
-APP_DIR="'"$APP_DIR"'"
-ACR_NAME="'"$ACR_NAME"'"
-ACR_LOGIN_SERVER="'"$ACR_LOGIN_SERVER"'"
-RAW_URL="'"$RAW_URL"'"
-IMAGE_TAG="'"$TAG"'"
-FE_HEALTH_URL="'"$FE_HEALTH_URL"'"
-
-if ! docker compose version >/dev/null 2>&1; then
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose || true
-  fi
-fi
-
-mkdir -p "$APP_DIR" && cd "$APP_DIR"
-curl -fsSL "$RAW_URL" -o docker-compose.yml
-printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
-
-az login --identity
-TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
-echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
-
-if docker compose version >/dev/null 2>&1; then
-  docker compose --env-file .env pull frontend
-  docker compose --env-file .env up -d --no-deps --force-recreate frontend
-else
-  docker-compose --env-file .env pull frontend
-  docker-compose --env-file .env up -d --no-deps --force-recreate frontend
-fi
-
-for i in $(seq 1 36); do
-  if curl -fsS "$FE_HEALTH_URL" >/dev/null; then
-    echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
-    echo "--- css files ---"; ls -l /usr/share/nginx/html/static/css || true
-    echo "--- index references ---"; grep -o "/static/css/[^\" ]*\\.css" -n /usr/share/nginx/html/index.html || true
-    echo "Frontend healthy"
-    exit 0
-  fi
-  sleep 5
-done
-echo "Frontend failed healthcheck"
-docker ps --filter name=ecommerce-frontend
-docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
-exit 1
-' >/dev/null
+            az vm run-command invoke -g "$RG" -n "$VM" \
+              --command-id RunShellScript \
+              --scripts @vm-frontend.sh \
+              --parameters "$APP_DIR" "$ACR_NAME" "$ACR_LOGIN_SERVER" "$RAW_URL" "$TAG" "$FE_HEALTH_URL" \
+              >/dev/null
           done
