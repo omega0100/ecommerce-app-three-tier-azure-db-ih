@@ -9,7 +9,6 @@ services:
       NODE_ENV: production
       PORT: 3001
 
-      # من .env على الـVM (يكتبها الـWorkflow)
       DB_HOST: ${DB_HOST}
       DB_PORT: 1433
       DB_USER: ${DB_USER}
@@ -18,13 +17,11 @@ services:
       DB_ENCRYPT: "true"
       DB_TRUST_SERVER_CERTIFICATE: "false"
 
-      # أسماء بديلة + سترنج اتصال صريح
       DB_SERVER: ${DB_HOST}
       SQL_SERVER: ${DB_HOST}
       MSSQL_HOST: ${DB_HOST}
       DATABASE_URL: "Server=${DB_HOST},1433;Database=${DB_NAME};User Id=${DB_USER};Password=${DB_PASSWORD};Encrypt=true;TrustServerCertificate=false;Connection Timeout=30;"
 
-      # إعدادات التطبيق
       JWT_EXPIRES_IN: 7d
       CORS_ORIGIN: "http://4.245.59.253"
 
@@ -41,6 +38,9 @@ services:
     ports:
       - "3000:80"
     restart: unless-stopped
+    # ← الإضافة: ربط ملف الكونفج
+    volumes:
+      - ./nginx.default.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost/health || exit 1"]
       interval: 20s
