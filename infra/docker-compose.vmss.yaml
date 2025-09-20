@@ -1,8 +1,6 @@
-# infra/docker-compose.vmss.yml
 version: "3.9"
 
 services:
-  # Backend API
   backend:
     image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG:-latest}
     container_name: ecommerce-backend
@@ -16,7 +14,6 @@ services:
       - DB_ENCRYPT=true
       - DB_TRUST_SERVER_CERTIFICATE=false
       - JWT_EXPIRES_IN=7d
-      # عدّل الـ IP/الدومين لو تغيّر
       - CORS_ORIGIN=http://4.245.59.253
     restart: unless-stopped
     healthcheck:
@@ -26,7 +23,6 @@ services:
       retries: 3
       start_period: 40s
 
-  # Frontend (React + nginx)
   frontend:
     image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG:-latest}
     container_name: ecommerce-frontend
@@ -39,7 +35,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-networks:
-  default:
-    name: ecommerce-network
