@@ -25,20 +25,28 @@ jobs:
       contents: read
 
     steps:
+      # 1) Checkout
       - uses: actions/checkout@v4
 
+      # 2) Azure login (سكريت واحد: AZURE_CREDENTIALS)
       - name: Azure CLI Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      # 3) ACR login (تأكد أن الـ SP يملك AcrPush)
       - name: ACR Login
         run: az acr login --name "$ACR_NAME" --only-show-errors
 
+      # 4) Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build & push Backend
+      # (اختياري لكن مفيد) اكتب نسخة الواجهة في public/version.txt لظهورها بعد البناء
+      - name: Prepare frontend version file
+        run: echo "${{ github.sha }}" > ./ecommerce-app-frontend/public/version.txt
+
+      # 5) Build & push Backend
       - name: Build and Push Backend
         run: |
           set -euo pipefail
@@ -50,88 +58,75 @@ jobs:
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:${TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
 
-      # Build & push Frontend (يمرر COMMIT_SHA اختياري)
+      # 6) Build & push Frontend
       - name: Build and Push Frontend
         run: |
           set -euo pipefail
           TAG=${{ github.sha }}
           docker build \
-            --build-arg COMMIT_SHA=${TAG} \
             -t $ACR_LOGIN_SERVER/ecommerce-frontend:${TAG} \
             -t $ACR_LOGIN_SERVER/ecommerce-frontend:latest \
             ./ecommerce-app-frontend
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-      # ====== Backend VMSS: اكتشف النمط (Flexible/Uniform) وحدث كل إنستانس ======
-      - name: Update VMSS Backend (detect mode & loop)
+      # 7) حدّث كل إنستانس Backend باستخدام instance-id (أرقام)
+      - name: Update VMSS Backend (loop all instances by instance-id)
         shell: bash
         run: |
           set -euo pipefail
-          MODE=$(az vmss show -g "$RG" -n "$VMSS_BE" --query "orchestrationMode" -o tsv)
-          echo "Backend VMSS mode: $MODE"
-
-          # سكربت التنفيذ على الماشين الهدف
-          REMOTE_SCRIPT=$'set -e\ncd '"$APP_DIR"$'\naz login --identity\nTOKEN=$(az acr login --name '"$ACR_NAME"$' --expose-token --query accessToken -o tsv)\necho $TOKEN | docker login '"$ACR_LOGIN_SERVER"$' -u 00000000-0000-0000-0000-000000000000 --password-stdin\ndocker compose pull backend\ndocker compose up -d --no-deps --pull always --force-recreate backend\ndocker ps --filter name=ecommerce-backend --format "container={{.ID}} image={{.Image}}"\ndocker image ls '"$ACR_LOGIN_SERVER"$'/ecommerce-backend --digests || true\ndocker image prune -f || true'
-
-          if [ "$MODE" = "Flexible" ]; then
-            # اجلب VM IDs العادية المرتبطة بهذا الـVMSS
-            VM_IDS=$(az vm list -g "$RG" \
-              --query "[?virtualMachineScaleSet && ends_with(virtualMachineScaleSet.id, '/virtualMachineScaleSets/${VMSS_BE}')].id" \
-              -o tsv)
-            if [ -z "${VM_IDS}" ]; then
-              echo "No VMs found for $VMSS_BE (Flexible)."; exit 1
-            fi
-            for VMID in $VM_IDS; do
-              echo "Updating backend on VM ID: $VMID"
-              az vm run-command invoke --ids "$VMID" --command-id RunShellScript --scripts "$REMOTE_SCRIPT" >/dev/null
-            done
-          else
-            # Uniform: استخدم instanceId رقمي + vmss run-command
-            IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
-            if [ -z "${IDS}" ]; then
-              echo "No instances found for $VMSS_BE (Uniform)."; exit 1
-            fi
-            for ID in $IDS; do
-              echo "Updating backend on instanceId: $ID"
-              az vmss run-command invoke -g "$RG" -n "$VMSS_BE" \
-                --instance-id "$ID" \
-                --command-id RunShellScript \
-                --scripts "$REMOTE_SCRIPT" >/dev/null
-            done
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
+            echo "No backend instances found — skipping."
+            exit 0
           fi
+          for ID in $IDS; do
+            echo "Updating backend instanceId=$ID ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_BE" \
+              --instance-id "$ID" \
+              --command-id RunShellScript \
+              --scripts '
+                set -e
+                cd '"$APP_DIR"'
+                az login --identity
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                docker compose pull backend
+                docker compose up -d --no-deps --pull always --force-recreate backend
+                docker ps --filter name=ecommerce-backend --format "container={{.ID}} image={{.Image}}"
+                docker image ls '"$ACR_LOGIN_SERVER"'/ecommerce-backend --digests
+                docker image prune -f
+              ' >/dev/null
+          done
 
-      # ====== Frontend VMSS: نفس الفكرة ======
-      - name: Update VMSS Frontend (detect mode & loop)
+      # 8) حدّث كل إنستانس Frontend بالطريقة نفسها
+      - name: Update VMSS Frontend (loop all instances by instance-id)
         shell: bash
         run: |
           set -euo pipefail
-          MODE=$(az vmss show -g "$RG" -n "$VMSS_FE" --query "orchestrationMode" -o tsv)
-          echo "Frontend VMSS mode: $MODE"
-
-          REMOTE_SCRIPT=$'set -e\ncd '"$APP_DIR"$'\naz login --identity\nTOKEN=$(az acr login --name '"$ACR_NAME"$' --expose-token --query accessToken -o tsv)\necho $TOKEN | docker login '"$ACR_LOGIN_SERVER"$' -u 00000000-0000-0000-0000-000000000000 --password-stdin\ndocker compose pull frontend\ndocker compose up -d --no-deps --pull always --force-recreate frontend\ndocker ps --filter name=ecommerce-frontend --format "container={{.ID}} image={{.Image}}"\ndocker image ls '"$ACR_LOGIN_SERVER"$'/ecommerce-frontend --digests || true\n(curl -sS http://localhost/version.txt || true)\ndocker image prune -f || true'
-
-          if [ "$MODE" = "Flexible" ]; then
-            VM_IDS=$(az vm list -g "$RG" \
-              --query "[?virtualMachineScaleSet && ends_with(virtualMachineScaleSet.id, '/virtualMachineScaleSets/${VMSS_FE}')].id" \
-              -o tsv)
-            if [ -z "${VM_IDS}" ]; then
-              echo "No VMs found for $VMSS_FE (Flexible)."; exit 1
-            fi
-            for VMID in $VM_IDS; do
-              echo "Updating frontend on VM ID: $VMID"
-              az vm run-command invoke --ids "$VMID" --command-id RunShellScript --scripts "$REMOTE_SCRIPT" >/dev/null
-            done
-          else
-            IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
-            if [ -z "${IDS}" ]; then
-              echo "No instances found for $VMSS_FE (Uniform)."; exit 1
-            fi
-            for ID in $IDS; do
-              echo "Updating frontend on instanceId: $ID"
-              az vmss run-command invoke -g "$RG" -n "$VMSS_FE" \
-                --instance-id "$ID" \
-                --command-id RunShellScript \
-                --scripts "$REMOTE_SCRIPT" >/dev/null
-            done
+          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
+          if [ -z "${IDS}" ]; then
+            echo "No frontend instances found — skipping."
+            exit 0
           fi
+          for ID in $IDS; do
+            echo "Updating frontend instanceId=$ID ..."
+            az vmss run-command invoke \
+              -g "$RG" -n "$VMSS_FE" \
+              --instance-id "$ID" \
+              --command-id RunShellScript \
+              --scripts '
+                set -e
+                cd '"$APP_DIR"'
+                az login --identity
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                docker compose pull frontend
+                docker compose up -d --no-deps --pull always --force-recreate frontend
+                docker ps --filter name=ecommerce-frontend --format "container={{.ID}} image={{.Image}}"
+                docker image ls '"$ACR_LOGIN_SERVER"'/ecommerce-frontend --digests
+                curl -sS http://127.0.0.1:3000/version.txt || true
+                docker image prune -f
+              ' >/dev/null
+          done
