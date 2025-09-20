@@ -4,25 +4,39 @@ services:
     container_name: ecommerce-backend
     ports:
       - "3001:3001"
-    environment:
-      - NODE_ENV=production
-      - PORT=3001
-
-      # اتصال SQL (قيمها تجي من .env اللي نكتبه على الـVM)
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=1433
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      - DB_ENCRYPT=true
-      - DB_TRUST_SERVER_CERTIFICATE=false
-
-      # سيكورتي/كروص
-      - JWT_EXPIRES_IN=7d
-      - CORS_ORIGIN=http://4.245.59.253
     restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+
+      # DB from workflow -> .env على الـ VM
+      DB_HOST: ${DB_HOST}
+      DB_PORT: 1433
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_ENCRYPT: "true"
+      DB_TRUST_SERVER_CERTIFICATE: "false"
+
+      # App
+      JWT_EXPIRES_IN: 7d
+      CORS_ORIGIN: "http://4.245.59.253"
+
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG:-latest}
+    container_name: ecommerce-frontend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
