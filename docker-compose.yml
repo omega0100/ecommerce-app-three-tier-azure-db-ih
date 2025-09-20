@@ -2,20 +2,19 @@ version: "3.9"
 
 services:
   backend:
-    image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG:-latest}
+    image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG}
     container_name: ecommerce-backend
     ports:
       - "3001:3001"
     env_file:
       - ./ecommerce-app-backend/.env
     environment:
-      - NODE_ENV=production
-      - PORT=3001
-      - DB_ENCRYPT=true
-      - DB_TRUST_SERVER_CERTIFICATE=false
-      - JWT_EXPIRES_IN=7d
-      # غيّر origin حسب الدومين/الـ IP لديك
-      - CORS_ORIGIN=http://4.245.59.253
+      NODE_ENV: production
+      PORT: 3001
+      DB_ENCRYPT: "true"
+      DB_TRUST_SERVER_CERTIFICATE: "false"
+      JWT_EXPIRES_IN: 7d
+      CORS_ORIGIN: "http://4.245.59.253"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"]
@@ -25,14 +24,14 @@ services:
       start_period: 40s
 
   frontend:
-    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG:-latest}
+    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG}
     container_name: ecommerce-frontend
     ports:
       - "3000:80"
     restart: unless-stopped
-    # إن كان عندك /health في nginx استخدمه؛ وإلا افحص الجذر /
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost/ || exit 1"]
+      # إن ما عندك /health، افحص index.html
+      test: ["CMD-SHELL", "curl -fsS http://localhost/index.html || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
