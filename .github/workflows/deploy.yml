@@ -10,7 +10,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # ===== عدّل الأسماء حسب بيئتك =====
   ACR_NAME: group4acr
   ACR_LOGIN_SERVER: group4acr.azurecr.io
   RG: RG-group4
@@ -26,103 +25,110 @@ jobs:
       contents: read
 
     steps:
+      # 1) Checkout
       - uses: actions/checkout@v4
 
-      # تسجيل دخول Azure باستخدام السكريت AZURE_CREDENTIALS
+      # 2) Azure login (باستخدام سكريت واحد AZURE_CREDENTIALS)
       - name: Azure CLI Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # تسجيل دخول ACR
+      # 3) ACR login (تأكد أن SP عنده AcrPush على ACR)
       - name: ACR Login
         run: az acr login --name "$ACR_NAME" --only-show-errors
 
+      # 4) Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ===== بناء ودفع صور الـ Backend =====
+      # 5) Build & push Backend (tags: commit + latest)
       - name: Build and Push Backend
         run: |
           set -euo pipefail
           BACKEND_TAG=${{ github.sha }}
-          docker build -t $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} ./ecommerce-app-backend
-          docker tag  $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} $ACR_LOGIN_SERVER/ecommerce-backend:latest
+          docker build \
+            -t $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-backend:latest \
+            ./ecommerce-app-backend
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
+          docker image inspect $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG} --format='built backend: {{.Id}}'
 
-      # ===== بناء ودفع صور الـ Frontend =====
+      # 6) Build & push Frontend (tags: commit + latest) + COMMIT_SHA
       - name: Build and Push Frontend
         run: |
           set -euo pipefail
           FRONTEND_TAG=${{ github.sha }}
-          docker build -t $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} ./ecommerce-app-frontend
-          docker tag  $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+          docker build \
+            --build-arg COMMIT_SHA=${FRONTEND_TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-frontend:latest \
+            ./ecommerce-app-frontend
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+          docker image inspect $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG} --format='built frontend: {{.Id}}'
 
-      # ===== تحديث جميع أجهزة الـ VM التابعة لـ VMSS الـ Backend (Uniform/Flexible) =====
+      # 7) حدّث كل إنستانس Backend
       - name: Update VMSS Backend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          # احصل على Resource ID الخاص بالـ VMSS
-          SSID=$(az vmss show -g "$RG" -n "$VMSS_BE" --query id -o tsv)
-
-          # استخرج كل الـ VMs المرتبطة بهذا الـ VMSS (يعمل مع Flexible & Uniform)
-          VM_IDS=$(az vm list -g "$RG" \
-            --query "[?virtualMachineScaleSet!=null && virtualMachineScaleSet.id=='${SSID}'].id" -o tsv)
-
+          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].id" -o tsv)
           if [ -z "${VM_IDS}" ]; then
-            echo "No VMs found for $VMSS_BE — skipping."
+            echo "No instances found in $VMSS_BE — skipping."
             exit 0
           fi
-
           for VMID in $VM_IDS; do
             echo "Updating backend on $VMID ..."
             az vm run-command invoke \
               --ids "$VMID" \
               --command-id RunShellScript \
-              --scripts "
+              --scripts '
                 set -e
-                cd '$APP_DIR'
+                cd '"$APP_DIR"'
                 az login --identity
-                TOKEN=\$(az acr login --name '$ACR_NAME' --expose-token --query accessToken -o tsv)
-                echo \$TOKEN | docker login '$ACR_LOGIN_SERVER' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                # اسحب + أعد إنشاء الكونتينر بالصورة الأحدث
                 docker compose pull backend
-                docker compose up -d --no-deps backend
+                docker compose up -d --no-deps --pull always --force-recreate backend
+                # تشخيص سريع
+                docker ps --filter name=ecommerce-backend --format "container={{.ID}} image={{.Image}}"
+                docker image ls '"$ACR_LOGIN_SERVER"'/ecommerce-backend --digests
                 docker image prune -f
-              " > /dev/null
+              ' > /dev/null
           done
 
-      # ===== تحديث جميع أجهزة الـ VM التابعة لـ VMSS الـ Frontend (Uniform/Flexible) =====
+      # 8) حدّث كل إنستانس Frontend
       - name: Update VMSS Frontend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          SSID=$(az vmss show -g "$RG" -n "$VMSS_FE" --query id -o tsv)
-
-          VM_IDS=$(az vm list -g "$RG" \
-            --query "[?virtualMachineScaleSet!=null && virtualMachineScaleSet.id=='${SSID}'].id" -o tsv)
-
+          VM_IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].id" -o tsv)
           if [ -z "${VM_IDS}" ]; then
-            echo "No VMs found for $VMSS_FE — skipping."
+            echo "No instances found in $VMSS_FE — skipping."
             exit 0
           fi
-
           for VMID in $VM_IDS; do
             echo "Updating frontend on $VMID ..."
             az vm run-command invoke \
               --ids "$VMID" \
               --command-id RunShellScript \
-              --scripts "
+              --scripts '
                 set -e
-                cd '$APP_DIR'
+                cd '"$APP_DIR"'
                 az login --identity
-                TOKEN=\$(az acr login --name '$ACR_NAME' --expose-token --query accessToken -o tsv)
-                echo \$TOKEN | docker login '$ACR_LOGIN_SERVER' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
+                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                # اسحب + أعد إنشاء الكونتينر بالصورة الأحدث
                 docker compose pull frontend
-                docker compose up -d --no-deps frontend
+                docker compose up -d --no-deps --pull always --force-recreate frontend
+                # تشخيص سريع
+                docker ps --filter name=ecommerce-frontend --format "container={{.ID}} image={{.Image}}"
+                docker image ls '"$ACR_LOGIN_SERVER"'/ecommerce-frontend --digests
+                # اطبع نسخة الواجهة إن كنت ضايف version.txt في الصورة
+                (curl -sS http://localhost/version.txt || true)
                 docker image prune -f
-              " > /dev/null
+              ' > /dev/null
           done
