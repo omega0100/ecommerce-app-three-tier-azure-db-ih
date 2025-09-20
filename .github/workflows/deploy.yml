@@ -187,3 +187,5 @@ echo '--- css files ---'; ls -l /usr/share/nginx/html/static/css || true
 echo '--- index references ---'; grep -o \"/static/css/[^\" ]*\\.css\" -n /usr/share/nginx/html/index.html || true
 " >/dev/null
           done
+
+          #55555
