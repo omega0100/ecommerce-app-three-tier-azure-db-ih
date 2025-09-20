@@ -73,7 +73,7 @@ jobs:
           set -euo pipefail
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
-          curl -fsI "$RAW" >/dev/null
+          curl -fsI "$RAW" >/dev/null || { echo "compose not found at $RAW"; exit 1; }
 
   deploy-backend:
     runs-on: ubuntu-latest
@@ -95,17 +95,19 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          set -euo pipefail
+          set -eo pipefail
 
           for v in DB_HOST DB_USER DB_PASSWORD DB_NAME; do
-            if [ -z "${!v:-}" ]; then echo "Missing secret: $v"; exit 1; fi
+            if [ -z "${!v:-}" ]; then
+              echo "missing secret: $v"; exit 1
+            fi
           done
 
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || exit 0
+          [ ${#NAMES[@]} -gt 0 ] || { echo "no instances in $VMSS_BE"; exit 0; }
 
           read -r -d '' REMOTE <<'EOS'
-          set -euo pipefail
+          set -euxo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
           ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
@@ -127,26 +129,27 @@ jobs:
           mkdir -p "$APP_DIR" && cd "$APP_DIR"
           curl -fsSL "$RAW_URL" -o docker-compose.yml
 
-          printf '%s\n' \
-            "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" \
-            "IMAGE_TAG=$IMAGE_TAG" \
-            "DB_HOST=$DB_HOST" \
-            "DB_USER=$DB_USER" \
-            "DB_PASSWORD=$DB_PASSWORD" \
-            "DB_NAME=$DB_NAME" > .env
+          : > .env
+          printf '%s\n' "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> .env
+          printf '%s\n' "IMAGE_TAG=$IMAGE_TAG" >> .env
+          printf '%s\n' "DB_HOST=$DB_HOST" >> .env
+          printf '%s\n' "DB_USER=$DB_USER" >> .env
+          printf '%s\n' "DB_PASSWORD=$DB_PASSWORD" >> .env
+          printf '%s\n' "DB_NAME=$DB_NAME" >> .env
 
           az login --identity
           TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
-          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+          docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
 
           docker compose --env-file .env pull backend || docker-compose --env-file .env pull backend
           docker rm -f ecommerce-backend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
 
           for i in $(seq 1 36); do
-            curl -fsS "$HEALTH_URL" >/dev/null && exit 0
+            curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
             sleep 5
           done
+          echo "Backend failed healthcheck"
           docker ps --filter name=ecommerce-backend
           docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
           exit 1
@@ -162,9 +165,10 @@ jobs:
           REMOTE=${REMOTE//__DB_USER__/$DB_USER}
           REMOTE=${REMOTE//__DB_PASSWORD__/$DB_PASSWORD}
           REMOTE=${REMOTE//__DB_NAME__/$DB_NAME}
-          B64=$(printf '%s' "$REMOTE" | base64 -w0)
 
+          B64=$(printf '%s' "$REMOTE" | base64 -w0)
           for VM in "${NAMES[@]}"; do
+            echo ">>> BACKEND on $VM"
             az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'"
@@ -187,12 +191,11 @@ jobs:
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
-
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || exit 0
+          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
 
           read -r -d '' REMOTE <<'EOS'
-          set -euo pipefail
+          set -euxo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
           ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
@@ -210,13 +213,13 @@ jobs:
           mkdir -p "$APP_DIR" && cd "$APP_DIR"
           curl -fsSL "$RAW_URL" -o docker-compose.yml
 
-          printf '%s\n' \
-            "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" \
-            "IMAGE_TAG=$IMAGE_TAG" > .env
+          : > .env
+          printf '%s\n' "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> .env
+          printf '%s\n' "IMAGE_TAG=$IMAGE_TAG" >> .env
 
           az login --identity
           TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
-          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+          docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 -p "$TOKEN"
 
           docker compose --env-file .env pull frontend || docker-compose --env-file .env pull frontend
           docker rm -f ecommerce-frontend 2>/dev/null || true
@@ -231,6 +234,7 @@ jobs:
             fi
             sleep 5
           done
+          echo "Frontend failed healthcheck"
           docker ps --filter name=ecommerce-frontend
           docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
           exit 1
@@ -242,10 +246,11 @@ jobs:
           REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
           REMOTE=${REMOTE//__TAG__/$TAG}
           REMOTE=${REMOTE//__HEALTH_URL__/$FE_HEALTH_URL}
-          B64=$(printf '%s' "$REMOTE" | base64 -w0)
 
+          B64=$(printf '%s' "$REMOTE" | base64 -w0)
           VERS=()
           for VM in "${NAMES[@]}"; do
+            echo ">>> FRONTEND on $VM"
             OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'")
