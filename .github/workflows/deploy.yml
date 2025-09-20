@@ -1,8 +1,8 @@
-name: Build & Deploy (ACR + VMSS rolling/health)
+name: Build and Deploy to ACR (force-sync compose + rolling health)
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
 
 concurrency:
@@ -16,176 +16,222 @@ env:
   VMSS_BE: vmss-backend-group4
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
-  COMPOSE_PATH_IN_REPO: docker-compose.yml
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
 jobs:
-  build:
-    name: Build & Push images to ACR
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Azure CLI login
+      - name: Azure CLI Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Docker login to ACR
+      - name: ACR Login
         run: az acr login --name "$ACR_NAME" --only-show-errors
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & Push BACKEND (tags: SHA + latest)
-        shell: bash
+      # ===== Build & Push (صور latest + commit) =====
+      - name: Build and Push Backend
         run: |
           set -euo pipefail
-          TAG="${{ github.sha }}"
+          TAG=${{ github.sha }}
           docker build \
-            -t "$ACR_LOGIN_SERVER/ecommerce-backend:${TAG}" \
-            -t "$ACR_LOGIN_SERVER/ecommerce-backend:latest" \
+            -t $ACR_LOGIN_SERVER/ecommerce-backend:${TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-backend:latest \
             ./ecommerce-app-backend
-          docker push "$ACR_LOGIN_SERVER/ecommerce-backend:${TAG}"
-          docker push "$ACR_LOGIN_SERVER/ecommerce-backend:latest"
+          docker push $ACR_LOGIN_SERVER/ecommerce-backend:${TAG}
+          docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
 
-      - name: Build & Push FRONTEND (tags: SHA + latest)
-        shell: bash
+      - name: Build and Push Frontend
         run: |
           set -euo pipefail
-          TAG="${{ github.sha }}"
+          TAG=${{ github.sha }}
           docker build \
-            --build-arg COMMIT_SHA="${TAG}" \
-            -t "$ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}" \
-            -t "$ACR_LOGIN_SERVER/ecommerce-frontend:latest" \
+            --build-arg COMMIT_SHA=${TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-frontend:${TAG} \
+            -t $ACR_LOGIN_SERVER/ecommerce-frontend:latest \
             ./ecommerce-app-frontend
-          docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}"
-          docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:latest"
+          docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}
+          docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-  deploy:
-    name: Deploy to VMSS (instance-by-instance + health)
-    runs-on: ubuntu-latest
-    needs: build
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Azure CLI login
-        uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Prepare RAW URL for docker-compose.yml
-        id: compose
+      # ===== دالة مساعدة تكتب compose موحّد + تحدث خدمة واحدة وتنتظر صحتها =====
+      - name: Update VMSS Backend (instance-by-instance with health)
         shell: bash
         run: |
           set -euo pipefail
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
-          echo "RAW_URL=$RAW_URL" | tee -a "$GITHUB_OUTPUT"
-          echo "Using RAW compose from: $RAW_URL"
 
-      - name: Update Backend VMSS (rolling + health + force-sync)
-        shell: bash
-        env:
-          RAW_URL: ${{ steps.compose.outputs.RAW_URL }}
-          TAG: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
-          for VM in "${NAMES[@]}"; do
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts "
-set -euo pipefail
-RAW_URL='${RAW_URL}'
-ACR_NAME='${ACR_NAME}'
-ACR_LOGIN_SERVER='${ACR_LOGIN_SERVER}'
-APP_DIR='${APP_DIR}'
-BE_HEALTH_URL='${BE_HEALTH_URL}'
-TAG='${TAG}'
-if ! command -v docker >/dev/null; then echo 'Docker not installed'; exit 1; fi
-if ! docker compose version >/dev/null 2>&1; then
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    sudo curl -L 'https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)' -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose || true
-  fi
-fi
-if ! command -v az >/dev/null 2>&1; then curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash; fi
-mkdir -p \"$APP_DIR\" && cd \"$APP_DIR\"
-curl -fsSL \"$RAW_URL\" -o docker-compose.yml
-printf '%s\n' \"ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER\" \"IMAGE_TAG=$TAG\" > .env
+          mapfile -t VM_NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
+          if [ ${#VM_NAMES[@]} -eq 0 ]; then
+            echo "No instances in $VMSS_BE — skip."
+            exit 0
+          fi
+
+          for VMNAME in "${VM_NAMES[@]}"; do
+            echo ">>> Updating BACKEND on ${VMNAME} ..."
+            az vm run-command invoke \
+              -g "$RG" -n "$VMNAME" \
+              --command-id RunShellScript \
+              --scripts "
+set -e
+cd \"$APP_DIR\"
+
+# 1) اكتب نسخة ذهبية من docker-compose.yml (بدون build: ، فقط image:)
+cat > docker-compose.yml <<COMPOSE
+version: \"3.9\"
+services:
+  backend:
+    image: $ACR_LOGIN_SERVER/ecommerce-backend:latest
+    container_name: ecommerce-backend
+    ports:
+      - \"3001:3001\"
+    env_file:
+      - ./ecommerce-app-backend/.env
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_ENCRYPT=true
+      - DB_TRUST_SERVER_CERTIFICATE=false
+      - JWT_EXPIRES_IN=7d
+      - CORS_ORIGIN=http://4.245.59.253
+    restart: unless-stopped
+    healthcheck:
+      test: [\"CMD-SHELL\", \"curl -fsS http://localhost:3001/health || exit 1\"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    image: $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+    container_name: ecommerce-frontend
+    ports:
+      - \"3000:80\"
+    restart: unless-stopped
+    healthcheck:
+      test: [\"CMD-SHELL\", \"curl -fsS http://localhost/health || exit 1\"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+COMPOSE
+
+# 2) Login ACR باستخدام الهوية المُدارة
 az login --identity
-TOKEN=\$(az acr login -n \"$ACR_NAME\" --expose-token --query accessToken -o tsv)
-echo \"\$TOKEN\" | docker login \"$ACR_LOGIN_SERVER\" -u 00000000-0000-0000-0000-000000000000 --password-stdin
-docker rm -f ecommerce-backend 2>/dev/null || true
-if docker compose version >/dev/null 2>&1; then
-  docker compose --env-file .env pull backend
-  docker compose --env-file .env up -d --no-deps --force-recreate backend
-else
-  docker-compose --env-file .env pull backend
-  docker-compose --env-file .env up -d --no-deps --force-recreate backend
-fi
-TRY=0; MAX=24
+TOKEN=\$(az acr login --name $ACR_NAME --expose-token --query accessToken -o tsv)
+echo \$TOKEN | docker login $ACR_LOGIN_SERVER -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+# 3) اسحب وشغّل backend فقط (ملف compose موحّد للخدمتين)
+docker compose pull backend
+docker compose up -d --no-deps --pull always --force-recreate backend
+
+# 4) انتظر الصحة
+TRY=0; MAX=36
 until curl -fsS \"$BE_HEALTH_URL\" >/dev/null; do
-  TRY=\$((TRY+1)); [ \$TRY -lt \$MAX ] || { docker ps --filter name=ecommerce-backend; docker logs \$(docker ps --filter name=ecommerce-backend -q) --tail 200 || true; exit 1; }
+  TRY=\$((TRY+1))
+  if [ \$TRY -ge \$MAX ]; then
+    echo 'Backend failed healthcheck'
+    docker ps --filter name=ecommerce-backend
+    docker logs \$(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
+    exit 1
+  fi
   sleep 5
 done
-echo 'Backend healthy'
-" >/dev/null
+echo 'Backend healthy ✓'
+" > /dev/null
           done
 
-      - name: Update Frontend VMSS (rolling + health + force-sync)
+      - name: Update VMSS Frontend (instance-by-instance with health)
         shell: bash
-        env:
-          RAW_URL: ${{ steps.compose.outputs.RAW_URL }}
-          TAG: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
-          for VM in "${NAMES[@]}"; do
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts "
-set -euo pipefail
-RAW_URL='${RAW_URL}'
-ACR_NAME='${ACR_NAME}'
-ACR_LOGIN_SERVER='${ACR_LOGIN_SERVER}'
-APP_DIR='${APP_DIR}'
-FE_HEALTH_URL='${FE_HEALTH_URL}'
-TAG='${TAG}'
-if ! command -v docker >/dev/null; then echo 'Docker not installed'; exit 1; fi
-if ! docker compose version >/dev/null 2>&1; then
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    sudo curl -L 'https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)' -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose || true
-  fi
-fi
-if ! command -v az >/dev/null 2>&1; then curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash; fi
-mkdir -p \"$APP_DIR\" && cd \"$APP_DIR\"
-curl -fsSL \"$RAW_URL\" -o docker-compose.yml
-printf '%s\n' \"ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER\" \"IMAGE_TAG=$TAG\" > .env
+
+          mapfile -t VM_NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
+          if [ ${#VM_NAMES[@]} -eq 0 ]; then
+            echo "No instances in $VMSS_FE — skip."
+            exit 0
+          fi
+
+          for VMNAME in "${VM_NAMES[@]}"; do
+            echo ">>> Updating FRONTEND on ${VMNAME} ..."
+            az vm run-command invoke \
+              -g "$RG" -n "$VMNAME" \
+              --command-id RunShellScript \
+              --scripts "
+set -e
+cd \"$APP_DIR\"
+
+# 1) نفس نسخة compose الذهبية لضمان التوحيد
+cat > docker-compose.yml <<COMPOSE
+version: \"3.9\"
+services:
+  backend:
+    image: $ACR_LOGIN_SERVER/ecommerce-backend:latest
+    container_name: ecommerce-backend
+    ports:
+      - \"3001:3001\"
+    env_file:
+      - ./ecommerce-app-backend/.env
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_ENCRYPT=true
+      - DB_TRUST_SERVER_CERTIFICATE=false
+      - JWT_EXPIRES_IN=7d
+      - CORS_ORIGIN=http://4.245.59.253
+    restart: unless-stopped
+    healthcheck:
+      test: [\"CMD-SHELL\", \"curl -fsS http://localhost:3001/health || exit 1\"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    image: $ACR_LOGIN_SERVER/ecommerce-frontend:latest
+    container_name: ecommerce-frontend
+    ports:
+      - \"3000:80\"
+    restart: unless-stopped
+    healthcheck:
+      test: [\"CMD-SHELL\", \"curl -fsS http://localhost/health || exit 1\"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+COMPOSE
+
+# 2) ACR login
 az login --identity
-TOKEN=\$(az acr login -n \"$ACR_NAME\" --expose-token --query accessToken -o tsv)
-echo \"\$TOKEN\" | docker login \"$ACR_LOGIN_SERVER\" -u 00000000-0000-0000-0000-000000000000 --password-stdin
-docker rm -f ecommerce-frontend 2>/dev/null || true
-if docker compose version >/dev/null 2>&1; then
-  docker compose --env-file .env pull frontend
-  docker compose --env-file .env up -d --no-deps --force-recreate frontend
-else
-  docker-compose --env-file .env pull frontend
-  docker-compose --env-file .env up -d --no-deps --force-recreate frontend
-fi
-TRY=0; MAX=24
+TOKEN=\$(az acr login --name $ACR_NAME --expose-token --query accessToken -o tsv)
+echo \$TOKEN | docker login $ACR_LOGIN_SERVER -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+# 3) اسحب وشغّل frontend
+docker compose pull frontend
+docker compose up -d --no-deps --pull always --force-recreate frontend
+
+# 4) انتظر الصحة + اطبع النسخة لو موجودة
+TRY=0; MAX=36
 until curl -fsS \"$FE_HEALTH_URL\" >/dev/null; do
-  TRY=\$((TRY+1)); [ \$TRY -lt \$MAX ] || { docker ps --filter name=ecommerce-frontend; docker logs \$(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true; exit 1; }
+  TRY=\$((TRY+1))
+  if [ \$TRY -ge \$MAX ]; then
+    echo 'Frontend failed healthcheck'
+    docker ps --filter name=ecommerce-frontend
+    docker logs \$(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
+    exit 1
+  fi
   sleep 5
 done
-echo -n 'version: '; cat /usr/share/nginx/html/version.txt || true
-echo '--- css files ---'; ls -l /usr/share/nginx/html/static/css || true
-echo '--- index references ---'; grep -o \"/static/css/[^\" ]*\\.css\" -n /usr/share/nginx/html/index.html || true
-" >/dev/null
+(curl -fsS http://127.0.0.1:3000/version.txt || true)
+echo 'Frontend healthy ✓'
+" > /dev/null
           done
-
-          #55555
