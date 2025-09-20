@@ -1,20 +1,21 @@
-# docker-compose.yml (موحّد للفرونت والباك)
+version: "3.9"
+
 services:
   backend:
-    profiles: ["backend"]
-    image: group4acr.azurecr.io/ecommerce-backend:latest
+    image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG:-latest}
     container_name: ecommerce-backend
     ports:
       - "3001:3001"
     env_file:
-      - ./ecommerce-app-backend/.env   # لازم الملف يكون موجود على VM الباك
+      - ./ecommerce-app-backend/.env
     environment:
       - NODE_ENV=production
       - PORT=3001
       - DB_ENCRYPT=true
       - DB_TRUST_SERVER_CERTIFICATE=false
       - JWT_EXPIRES_IN=7d
-      - CORS_ORIGIN=http://4.245.59.253   # عدّلها لدومينك لو عندك
+      # غيّر origin حسب الدومين/الـ IP لديك
+      - CORS_ORIGIN=http://4.245.59.253
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"]
@@ -24,15 +25,13 @@ services:
       start_period: 40s
 
   frontend:
-    profiles: ["frontend"]
-    image: group4acr.azurecr.io/ecommerce-frontend:latest
+    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG:-latest}
     container_name: ecommerce-frontend
     ports:
       - "3000:80"
-    # لا تستخدم depends_on هنا لأن الباك اند على VM مختلفة
     restart: unless-stopped
+    # إن كان عندك /health في nginx استخدمه؛ وإلا افحص الجذر /
     healthcheck:
-      # nginx ما عنده /health غالباً، نضرب على الجذر
       test: ["CMD-SHELL", "curl -fsS http://localhost/ || exit 1"]
       interval: 30s
       timeout: 10s
