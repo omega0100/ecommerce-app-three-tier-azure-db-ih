@@ -18,8 +18,8 @@ COPY --from=build /app/build /usr/share/nginx/html
 ARG COMMIT_SHA=dev
 RUN sh -c 'echo "$COMMIT_SHA" > /usr/share/nginx/html/version.txt'
 
-# Nginx config
-COPY nginx.conf /etc/nginx/nginx.conf
+# Nginx confi
+ COPY nginx.default.conf /etc/nginx/conf.d/default.conf
 
 EXPOSE 80
 
