@@ -1,4 +1,3 @@
-# .github/workflows/deploy.yml
 name: Build & Deploy (ACR + VMSS with RAW compose, pinned tag)
 
 on:
@@ -17,9 +16,7 @@ env:
   VMSS_BE: vmss-backend-group4
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
-  # مكان ملف الـ compose داخل الريبو (هنا في الجذر)
   COMPOSE_PATH_IN_REPO: docker-compose.yml
-  # صحيّة الباك والفرونت (على بورتات الهوست)
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
@@ -77,7 +74,6 @@ jobs:
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
           echo "Using compose: $RAW"
-          # تأكيد أنه موجود (200 OK)
           curl -fsI "$RAW" >/dev/null || { echo "❌ Compose not found at $RAW"; exit 1; }
 
   deploy-backend:
@@ -95,19 +91,23 @@ jobs:
         env:
           RAW_URL: ${{ needs.build.outputs.RAW_URL }}
           TAG: ${{ needs.build.outputs.TAG }}
-          # أسرار اتصال قاعدة البيانات من GitHub Secrets
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          set -euo pipefail
+          set -eo pipefail
 
-          # جِب أسماء الانستانس في الـVMSS
+          for v in DB_HOST DB_USER DB_PASSWORD DB_NAME; do
+            if [ -z "${!v:-}" ]; then
+              echo "❌ Missing secret: $v"; exit 1
+            fi
+          done
+
+          az vmss show -g "$RG" -n "$VMSS_BE" >/dev/null
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
 
-          # سكربت يُنفّذ داخل كل VM
           read -r -d '' REMOTE <<'EOS'
           set -euxo pipefail
           APP_DIR="__APP_DIR__"
@@ -116,13 +116,11 @@ jobs:
           RAW_URL="__RAW_URL__"
           IMAGE_TAG="__TAG__"
           HEALTH_URL="__HEALTH_URL__"
-
           DB_HOST="__DB_HOST__"
           DB_USER="__DB_USER__"
           DB_PASSWORD="__DB_PASSWORD__"
           DB_NAME="__DB_NAME__"
 
-          # تأكد من وجود docker compose (v2 أو v1)
           if ! docker compose version >/dev/null 2>&1; then
             if ! command -v docker-compose >/dev/null 2>&1; then
               sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
@@ -133,8 +131,7 @@ jobs:
           mkdir -p "$APP_DIR" && cd "$APP_DIR"
           curl -fsSL "$RAW_URL" -o docker-compose.yml
 
-          # اكتب ملف .env ليُقرأ بواسطة compose
-          printf "%s\n" \
+          printf '%s\n' \
             "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" \
             "IMAGE_TAG=$IMAGE_TAG" \
             "DB_HOST=$DB_HOST" \
@@ -142,17 +139,14 @@ jobs:
             "DB_PASSWORD=$DB_PASSWORD" \
             "DB_NAME=$DB_NAME" > .env
 
-          # سجّل دخول لـ ACR باستخدام Managed Identity
           az login --identity
           TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
           echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
-          # اسحب الصورة وأعد إنشاء خدمة الباك بقوة
           docker compose --env-file .env pull backend || docker-compose --env-file .env pull backend
           docker rm -f ecommerce-backend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
 
-          # انتظر الصحة
           for i in $(seq 1 36); do
             curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
             sleep 5
@@ -163,24 +157,22 @@ jobs:
           exit 1
           EOS
 
-          # استبدال المتغيّرات داخل السكربت
           REMOTE=${REMOTE//__APP_DIR__/$APP_DIR}
           REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
           REMOTE=${REMOTE//__ACR_LOGIN_SERVER__/$ACR_LOGIN_SERVER}
           REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
           REMOTE=${REMOTE//__TAG__/$TAG}
           REMOTE=${REMOTE//__HEALTH_URL__/$BE_HEALTH_URL}
-
           REMOTE=${REMOTE//__DB_HOST__/$DB_HOST}
           REMOTE=${REMOTE//__DB_USER__/$DB_USER}
           REMOTE=${REMOTE//__DB_PASSWORD__/$DB_PASSWORD}
           REMOTE=${REMOTE//__DB_NAME__/$DB_NAME}
 
           B64=$(printf '%s' "$REMOTE" | base64 -w0)
-
           for VM in "${NAMES[@]}"; do
             echo ">>> BACKEND on $VM"
             az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+              --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'"
           done
 
@@ -201,7 +193,6 @@ jobs:
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
-
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
 
@@ -224,7 +215,7 @@ jobs:
           mkdir -p "$APP_DIR" && cd "$APP_DIR"
           curl -fsSL "$RAW_URL" -o docker-compose.yml
 
-          printf "%s\n" \
+          printf '%s\n' \
             "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" \
             "IMAGE_TAG=$IMAGE_TAG" > .env
 
@@ -236,7 +227,6 @@ jobs:
           docker rm -f ecommerce-frontend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate frontend || docker-compose --env-file .env up -d --no-deps --force-recreate frontend
 
-          # انتظر الصحة واطبع نسخة الـ build ومحتويات الأصول
           for i in $(seq 1 36); do
             if curl -fsS "$HEALTH_URL" >/dev/null; then
               echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
@@ -246,7 +236,6 @@ jobs:
             fi
             sleep 5
           done
-
           echo "Frontend failed healthcheck"
           docker ps --filter name=ecommerce-frontend
           docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
@@ -273,7 +262,6 @@ jobs:
             VERS+=("$V")
           done
 
-          # لو اختلفت النسخ بين الـ VMs نفشل (منع تذبذب النسخ)
           if [ "$(printf '%s\n' "${VERS[@]}" | sort -u | wc -l)" -ne 1 ]; then
             echo "Detected mixed frontend versions across VMs: ${VERS[*]}"
             exit 1
