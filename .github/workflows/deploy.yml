@@ -17,7 +17,6 @@ env:
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
   COMPOSE_PATH_IN_REPO: docker-compose.yml
-  FE_CONF_IN_REPO: nginx.default.conf
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
@@ -27,7 +26,6 @@ jobs:
     permissions: { id-token: write, contents: read }
     outputs:
       RAW_URL: ${{ steps.compose.outputs.RAW_URL }}
-      RAW_CONF_URL: ${{ steps.compose.outputs.RAW_CONF_URL }}
       TAG: ${{ steps.tag.outputs.TAG }}
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +66,7 @@ jobs:
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}"
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:latest"
 
-      - name: Prepare RAW URLs
+      - name: Prepare RAW compose URL
         id: compose
         shell: bash
         run: |
@@ -76,9 +74,6 @@ jobs:
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
           curl -fsI "$RAW" >/dev/null || { echo "compose not found at $RAW"; exit 1; }
-          CONF="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${FE_CONF_IN_REPO}"
-          echo "RAW_CONF_URL=$CONF" | tee -a "$GITHUB_OUTPUT"
-          curl -fsI "$CONF" >/dev/null || echo "note: frontend nginx config not found at $CONF (frontend will still run)"
 
   deploy-backend:
     runs-on: ubuntu-latest
@@ -90,7 +85,7 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Roll BACKEND on each VM (pin exact tag)
+      - name: Roll BACKEND on each VM (pin exact tag, verbose)
         shell: bash
         env:
           RAW_URL: ${{ needs.build.outputs.RAW_URL }}
@@ -100,15 +95,18 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          set -eo pipefail
+          set -euxo pipefail
+
+          az account show -o table
+          az vmss show -g "$RG" -n "$VMSS_BE" -o table
+          az vmss list-instances -g "$RG" -n "$VMSS_BE" -o table
+
           for v in DB_HOST DB_USER DB_PASSWORD DB_NAME; do
-            if [ -z "${!v:-}" ]; then
-              echo "missing secret: $v"; exit 1
-            fi
+            [ -n "${!v:-}" ] || { echo "missing secret: $v"; exit 1; }
           done
 
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "no instances in $VMSS_BE"; exit 0; }
+          [ ${#NAMES[@]} -gt 0 ] || { echo "no instances in $VMSS_BE"; exit 1; }
 
           read -r -d '' REMOTE <<'EOS'
           set -euxo pipefail
@@ -183,10 +181,11 @@ jobs:
 
           B64=$(printf '%s' "$REMOTE" | base64 -w0)
           for VM in "${NAMES[@]}"; do
-            echo ">>> BACKEND on $VM"
+            echo "::group::BACKEND on $VM"
             az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'"
+            echo "::endgroup::"
           done
 
   deploy-frontend:
@@ -203,12 +202,11 @@ jobs:
         shell: bash
         env:
           RAW_URL: ${{ needs.build.outputs.RAW_URL }}
-          RAW_CONF_URL: ${{ needs.build.outputs.RAW_CONF_URL }}
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
+          [ ${#NAMES[@]} -gt 0 ] || { echo "no instances in $VMSS_FE"; exit 0; }
 
           read -r -d '' REMOTE <<'EOS'
           set -euxo pipefail
@@ -216,7 +214,6 @@ jobs:
           ACR_NAME="__ACR_NAME__"
           ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
           RAW_URL="__RAW_URL__"
-          RAW_CONF_URL="__RAW_CONF_URL__"
           IMAGE_TAG="__TAG__"
           HEALTH_URL="__HEALTH_URL__"
 
@@ -229,9 +226,6 @@ jobs:
 
           mkdir -p "$APP_DIR" && cd "$APP_DIR"
           curl -fsSL "$RAW_URL" -o docker-compose.yml
-          if [ -n "__RAW_CONF_URL__" ]; then
-            curl -fsSL "$RAW_CONF_URL" -o nginx.default.conf || true
-          fi
 
           {
             echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER"
@@ -257,7 +251,7 @@ jobs:
           done
 
           echo "Frontend failed healthcheck"
-          docker ps --format 'table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}' --filter name=ecommerce-frontend || true
+          docker ps --filter name=ecommerce-frontend
           docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
           exit 1
           EOS
@@ -266,20 +260,20 @@ jobs:
           REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
           REMOTE=${REMOTE//__ACR_LOGIN_SERVER__/$ACR_LOGIN_SERVER}
           REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
-          REMOTE=${REMOTE//__RAW_CONF_URL__/$RAW_CONF_URL}
           REMOTE=${REMOTE//__TAG__/$TAG}
           REMOTE=${REMOTE//__HEALTH_URL__/$FE_HEALTH_URL}
 
           B64=$(printf '%s' "$REMOTE" | base64 -w0)
           VERS=()
           for VM in "${NAMES[@]}"; do
-            echo ">>> FRONTEND on $VM"
+            echo "::group::FRONTEND on $VM"
             OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'")
             echo "$OUT"
             V=$(echo "$OUT" | sed -n 's/^version: *//p' | head -n1)
             VERS+=("$V")
+            echo "::endgroup::"
           done
 
           if [ "$(printf '%s\n' "${VERS[@]}" | sort -u | wc -l)" -ne 1 ]; then
