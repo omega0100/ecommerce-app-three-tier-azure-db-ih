@@ -10,6 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # ===== عدّل الأسماء حسب بيئتك =====
   ACR_NAME: group4acr
   ACR_LOGIN_SERVER: group4acr.azurecr.io
   RG: RG-group4
@@ -27,18 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # تسجيل دخول Azure باستخدام السكريت AZURE_CREDENTIALS
       - name: Azure CLI Login
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      # تسجيل دخول ACR
       - name: ACR Login
         run: az acr login --name "$ACR_NAME" --only-show-errors
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build & push backend
+      # ===== بناء ودفع صور الـ Backend =====
       - name: Build and Push Backend
         run: |
           set -euo pipefail
@@ -48,7 +51,7 @@ jobs:
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:${BACKEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-backend:latest
 
-      # Build & push frontend
+      # ===== بناء ودفع صور الـ Frontend =====
       - name: Build and Push Frontend
         run: |
           set -euo pipefail
@@ -58,58 +61,68 @@ jobs:
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:${FRONTEND_TAG}
           docker push $ACR_LOGIN_SERVER/ecommerce-frontend:latest
 
-      # ===== Backend VMSS: loop with numeric instanceId =====
+      # ===== تحديث جميع أجهزة الـ VM التابعة لـ VMSS الـ Backend (Uniform/Flexible) =====
       - name: Update VMSS Backend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].instanceId" -o tsv)
-          if [ -z "${IDS}" ]; then
-            echo "No instances found in $VMSS_BE — skipping."
+          # احصل على Resource ID الخاص بالـ VMSS
+          SSID=$(az vmss show -g "$RG" -n "$VMSS_BE" --query id -o tsv)
+
+          # استخرج كل الـ VMs المرتبطة بهذا الـ VMSS (يعمل مع Flexible & Uniform)
+          VM_IDS=$(az vm list -g "$RG" \
+            --query "[?virtualMachineScaleSet!=null && virtualMachineScaleSet.id=='${SSID}'].id" -o tsv)
+
+          if [ -z "${VM_IDS}" ]; then
+            echo "No VMs found for $VMSS_BE — skipping."
             exit 0
           fi
-          for id in $IDS; do
-            echo "Updating backend instanceId=$id ..."
-            az vmss run-command invoke \
-              -g "$RG" -n "$VMSS_BE" \
+
+          for VMID in $VM_IDS; do
+            echo "Updating backend on $VMID ..."
+            az vm run-command invoke \
+              --ids "$VMID" \
               --command-id RunShellScript \
-              --instance-id "$id" \
-              --scripts '
+              --scripts "
                 set -e
-                cd '"$APP_DIR"'
+                cd '$APP_DIR'
                 az login --identity
-                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
-                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                TOKEN=\$(az acr login --name '$ACR_NAME' --expose-token --query accessToken -o tsv)
+                echo \$TOKEN | docker login '$ACR_LOGIN_SERVER' -u 00000000-0000-0000-0000-000000000000 --password-stdin
                 docker compose pull backend
                 docker compose up -d --no-deps backend
                 docker image prune -f
-              ' > /dev/null
+              " > /dev/null
           done
 
-      # ===== Frontend VMSS: loop with numeric instanceId =====
+      # ===== تحديث جميع أجهزة الـ VM التابعة لـ VMSS الـ Frontend (Uniform/Flexible) =====
       - name: Update VMSS Frontend (loop all instances)
         shell: bash
         run: |
           set -euo pipefail
-          IDS=$(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].instanceId" -o tsv)
-          if [ -z "${IDS}" ]; then
-            echo "No instances found in $VMSS_FE — skipping."
+          SSID=$(az vmss show -g "$RG" -n "$VMSS_FE" --query id -o tsv)
+
+          VM_IDS=$(az vm list -g "$RG" \
+            --query "[?virtualMachineScaleSet!=null && virtualMachineScaleSet.id=='${SSID}'].id" -o tsv)
+
+          if [ -z "${VM_IDS}" ]; then
+            echo "No VMs found for $VMSS_FE — skipping."
             exit 0
           fi
-          for id in $IDS; do
-            echo "Updating frontend instanceId=$id ..."
-            az vmss run-command invoke \
-              -g "$RG" -n "$VMSS_FE" \
+
+          for VMID in $VM_IDS; do
+            echo "Updating frontend on $VMID ..."
+            az vm run-command invoke \
+              --ids "$VMID" \
               --command-id RunShellScript \
-              --instance-id "$id" \
-              --scripts '
+              --scripts "
                 set -e
-                cd '"$APP_DIR"'
+                cd '$APP_DIR'
                 az login --identity
-                TOKEN=$(az acr login --name '"$ACR_NAME"' --expose-token --query accessToken -o tsv)
-                echo $TOKEN | docker login '"$ACR_LOGIN_SERVER"' -u 00000000-0000-0000-0000-000000000000 --password-stdin
+                TOKEN=\$(az acr login --name '$ACR_NAME' --expose-token --query accessToken -o tsv)
+                echo \$TOKEN | docker login '$ACR_LOGIN_SERVER' -u 00000000-0000-0000-0000-000000000000 --password-stdin
                 docker compose pull frontend
                 docker compose up -d --no-deps frontend
                 docker image prune -f
-              ' > /dev/null
+              " > /dev/null
           done
