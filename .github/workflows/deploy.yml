@@ -73,8 +73,7 @@ jobs:
           set -euo pipefail
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
-          echo "Using compose: $RAW"
-          curl -fsI "$RAW" >/dev/null || { echo "❌ Compose not found at $RAW"; exit 1; }
+          curl -fsI "$RAW" >/dev/null
 
   deploy-backend:
     runs-on: ubuntu-latest
@@ -96,20 +95,17 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          set -eo pipefail
+          set -euo pipefail
 
           for v in DB_HOST DB_USER DB_PASSWORD DB_NAME; do
-            if [ -z "${!v:-}" ]; then
-              echo "❌ Missing secret: $v"; exit 1
-            fi
+            if [ -z "${!v:-}" ]; then echo "Missing secret: $v"; exit 1; fi
           done
 
-          az vmss show -g "$RG" -n "$VMSS_BE" >/dev/null
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
+          [ ${#NAMES[@]} -gt 0 ] || exit 0
 
           read -r -d '' REMOTE <<'EOS'
-          set -euxo pipefail
+          set -euo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
           ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
@@ -148,10 +144,9 @@ jobs:
           docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
 
           for i in $(seq 1 36); do
-            curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
+            curl -fsS "$HEALTH_URL" >/dev/null && exit 0
             sleep 5
           done
-          echo "Backend failed healthcheck"
           docker ps --filter name=ecommerce-backend
           docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
           exit 1
@@ -167,10 +162,9 @@ jobs:
           REMOTE=${REMOTE//__DB_USER__/$DB_USER}
           REMOTE=${REMOTE//__DB_PASSWORD__/$DB_PASSWORD}
           REMOTE=${REMOTE//__DB_NAME__/$DB_NAME}
-
           B64=$(printf '%s' "$REMOTE" | base64 -w0)
+
           for VM in "${NAMES[@]}"; do
-            echo ">>> BACKEND on $VM"
             az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'"
@@ -193,11 +187,12 @@ jobs:
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
+
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
-          [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
+          [ ${#NAMES[@]} -gt 0 ] || exit 0
 
           read -r -d '' REMOTE <<'EOS'
-          set -euxo pipefail
+          set -euo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
           ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
@@ -236,7 +231,6 @@ jobs:
             fi
             sleep 5
           done
-          echo "Frontend failed healthcheck"
           docker ps --filter name=ecommerce-frontend
           docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
           exit 1
@@ -248,12 +242,10 @@ jobs:
           REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
           REMOTE=${REMOTE//__TAG__/$TAG}
           REMOTE=${REMOTE//__HEALTH_URL__/$FE_HEALTH_URL}
-
           B64=$(printf '%s' "$REMOTE" | base64 -w0)
 
           VERS=()
           for VM in "${NAMES[@]}"; do
-            echo ">>> FRONTEND on $VM"
             OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
               --query "value[0].message" -o tsv \
               --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'")
