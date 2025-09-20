@@ -16,7 +16,7 @@ env:
   VMSS_BE: vmss-backend-group4
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
-  COMPOSE_PATH_IN_REPO: infra/docker-compose.vmss.yml
+  COMPOSE_PATH_IN_REPO: ecommerce-app-three-tier-azure-db-ih/docker-compose.yml
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
@@ -66,13 +66,16 @@ jobs:
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}"
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:latest"
 
-      - name: Prepare RAW compose URL
-        id: compose
-        run: |
-          set -euo pipefail
-          RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
-          echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
-          echo "Using compose: $RAW"
+            - name: Prepare RAW compose URL
+              id: compose
+              shell: bash
+              run: |
+                set -euo pipefail
+                RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
+                echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
+                echo "Using compose: $RAW"
+                # تأكيد أنه موجود (200 OK)
+                curl -fsI "$RAW" >/dev/null || { echo "❌ Compose not found at $RAW"; exit 1; }
 
   deploy-backend:
     runs-on: ubuntu-latest
