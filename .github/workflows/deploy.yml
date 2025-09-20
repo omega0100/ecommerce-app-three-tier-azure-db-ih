@@ -1,4 +1,4 @@
-name: Build & Deploy (ACR + VMSS rolling with RAW compose)
+name: Build & Deploy (ACR + VMSS with RAW compose, pinned tag)
 
 on:
   push:
@@ -16,20 +16,16 @@ env:
   VMSS_BE: vmss-backend-group4
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
-  COMPOSE_PATH_IN_REPO: docker-compose.yml
-  SCRIPT_PATH_IN_REPO: infra/scripts/vmss-deploy.sh
+  COMPOSE_PATH_IN_REPO: infra/docker-compose.vmss.yml
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+    permissions: { id-token: write, contents: read }
     outputs:
-      RAW_COMPOSE_URL: ${{ steps.out.outputs.RAW_COMPOSE_URL }}
-      SCRIPT_URL: ${{ steps.out.outputs.SCRIPT_URL }}
+      RAW_URL: ${{ steps.compose.outputs.RAW_URL }}
       TAG: ${{ steps.tag.outputs.TAG }}
     steps:
       - uses: actions/checkout@v4
@@ -42,13 +38,15 @@ jobs:
       - name: ACR login
         run: az acr login --name "$ACR_NAME" --only-show-errors
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Set TAG
         id: tag
         run: echo "TAG=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push BACKEND
+        shell: bash
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.TAG }}"
@@ -58,6 +56,7 @@ jobs:
           docker push "$ACR_LOGIN_SERVER/ecommerce-backend:latest"
 
       - name: Build & Push FRONTEND
+        shell: bash
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.TAG }}"
@@ -67,75 +66,173 @@ jobs:
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:${TAG}"
           docker push "$ACR_LOGIN_SERVER/ecommerce-frontend:latest"
 
-      - name: Export RAW URLs
-        id: out
+      - name: Prepare RAW compose URL
+        id: compose
         run: |
           set -euo pipefail
-          echo "RAW_COMPOSE_URL=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}" >> "$GITHUB_OUTPUT"
-          echo "SCRIPT_URL=https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${SCRIPT_PATH_IN_REPO}" >> "$GITHUB_OUTPUT"
+          RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
+          echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
+          echo "Using compose: $RAW"
 
   deploy-backend:
     runs-on: ubuntu-latest
     needs: build
-    permissions:
-      id-token: write
-      contents: read
+    permissions: { id-token: write, contents: read }
     steps:
-      - uses: azure/login@v1
+      - name: Azure login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Rolling update BACKEND
+      - name: Roll BACKEND on each VM (pin exact tag)
+        shell: bash
         env:
-          RAW: ${{ needs.build.outputs.RAW_COMPOSE_URL }}
-          SCR: ${{ needs.build.outputs.SCRIPT_URL }}
+          RAW_URL: ${{ needs.build.outputs.RAW_URL }}
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
+
+          read -r -d '' REMOTE <<'EOS'
+          set -euxo pipefail
+          APP_DIR="__APP_DIR__"
+          ACR_NAME="__ACR_NAME__"
+          ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
+          RAW_URL="__RAW_URL__"
+          IMAGE_TAG="__TAG__"
+          HEALTH_URL="__HEALTH_URL__"
+
+          # ensure docker compose exists
+          if ! docker compose version >/dev/null 2>&1; then
+            if ! command -v docker-compose >/dev/null 2>&1; then
+              sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose || true
+            fi
+          fi
+
+          mkdir -p "$APP_DIR" && cd "$APP_DIR"
+          curl -fsSL "$RAW_URL" -o docker-compose.yml
+          printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
+
+          az login --identity
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+          # pull + hard recreate service
+          docker compose --env-file .env pull backend || docker-compose --env-file .env pull backend
+          docker rm -f ecommerce-backend 2>/dev/null || true
+          docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
+
+          # wait health
+          for i in $(seq 1 36); do
+            curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
+            sleep 5
+          done
+          echo "Backend failed healthcheck"; docker ps --filter name=ecommerce-backend
+          docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
+          exit 1
+          EOS
+
+          REMOTE=${REMOTE//__APP_DIR__/$APP_DIR}
+          REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
+          REMOTE=${REMOTE//__ACR_LOGIN_SERVER__/$ACR_LOGIN_SERVER}
+          REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
+          REMOTE=${REMOTE//__TAG__/$TAG}
+          REMOTE=${REMOTE//__HEALTH_URL__/$BE_HEALTH_URL}
+          B64=$(printf '%s' "$REMOTE" | base64 -w0)
+
           for VM in "${NAMES[@]}"; do
             echo ">>> BACKEND on $VM"
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts \
-              "curl -fsSL '${SCR}' | bash -s -- \
-                --app-dir '${APP_DIR}' \
-                --acr-name '${ACR_NAME}' \
-                --acr-login '${ACR_LOGIN_SERVER}' \
-                --raw-compose-url '${RAW}' \
-                --image-tag '${TAG}' \
-                --health-url '${BE_HEALTH_URL}' \
-                --service backend" >/dev/null
+            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+              --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'"
           done
 
   deploy-frontend:
     runs-on: ubuntu-latest
     needs: deploy-backend
-    permissions:
-      id-token: write
-      contents: read
+    permissions: { id-token: write, contents: read }
     steps:
-      - uses: azure/login@v1
+      - name: Azure login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Rolling update FRONTEND
+      - name: Roll FRONTEND on each VM (pin exact tag + verify)
+        shell: bash
         env:
-          RAW: ${{ needs.build.outputs.RAW_COMPOSE_URL }}
-          SCR: ${{ needs.build.outputs.SCRIPT_URL }}
+          RAW_URL: ${{ needs.build.outputs.RAW_URL }}
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
+
+          read -r -d '' REMOTE <<'EOS'
+          set -euxo pipefail
+          APP_DIR="__APP_DIR__"
+          ACR_NAME="__ACR_NAME__"
+          ACR_LOGIN_SERVER="__ACR_LOGIN_SERVER__"
+          RAW_URL="__RAW_URL__"
+          IMAGE_TAG="__TAG__"
+          HEALTH_URL="__HEALTH_URL__"
+
+          if ! docker compose version >/dev/null 2>&1; then
+            if ! command -v docker-compose >/dev/null 2>&1; then
+              sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose || true
+            fi
+          fi
+
+          mkdir -p "$APP_DIR" && cd "$APP_DIR"
+          curl -fsSL "$RAW_URL" -o docker-compose.yml
+          printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
+
+          az login --identity
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
+
+          docker compose --env-file .env pull frontend || docker-compose --env-file .env pull frontend
+          docker rm -f ecommerce-frontend 2>/dev/null || true
+          docker compose --env-file .env up -d --no-deps --force-recreate frontend || docker-compose --env-file .env up -d --no-deps --force-recreate frontend
+
+          # wait and print proof
+          for i in $(seq 1 36); do
+            if curl -fsS "$HEALTH_URL" >/dev/null; then
+              echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
+              echo "--- css files ---"; ls -l /usr/share/nginx/html/static/css || true
+              echo "--- js files ---";  ls -l /usr/share/nginx/html/static/js  || true
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Frontend failed healthcheck"
+          docker ps --filter name=ecommerce-frontend
+          docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
+          exit 1
+          EOS
+
+          REMOTE=${REMOTE//__APP_DIR__/$APP_DIR}
+          REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
+          REMOTE=${REMOTE//__ACR_LOGIN_SERVER__/$ACR_LOGIN_SERVER}
+          REMOTE=${REMOTE//__RAW_URL__/$RAW_URL}
+          REMOTE=${REMOTE//__TAG__/$TAG}
+          REMOTE=${REMOTE//__HEALTH_URL__/$FE_HEALTH_URL}
+          B64=$(printf '%s' "$REMOTE" | base64 -w0)
+
+          VERS=()
           for VM in "${NAMES[@]}"; do
             echo ">>> FRONTEND on $VM"
-            az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript --scripts \
-              "curl -fsSL '${SCR}' | bash -s -- \
-                --app-dir '${APP_DIR}' \
-                --acr-name '${ACR_NAME}' \
-                --acr-login '${ACR_LOGIN_SERVER}' \
-                --raw-compose-url '${RAW}' \
-                --image-tag '${TAG}' \
-                --health-url '${FE_HEALTH_URL}' \
-                --service frontend" >/dev/null
+            OUT=$(az vm run-command invoke -g "$RG" -n "$VM" --command-id RunShellScript \
+              --query "value[0].message" -o tsv \
+              --scripts "bash -lc 'echo $B64 | base64 -d > /tmp/run.sh && bash /tmp/run.sh'")
+            echo "$OUT"
+            V=$(echo "$OUT" | sed -n 's/^version: *//p' | head -n1)
+            VERS+=("$V")
           done
+
+          # if any VM has different version => fail (لتمنع تذبذب النسخ)
+          if [ "$(printf '%s\n' "${VERS[@]}" | sort -u | wc -l)" -ne 1 ]; then
+            echo "Detected mixed frontend versions across VMs: ${VERS[*]}"
+            exit 1
+          fi
