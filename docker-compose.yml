@@ -9,7 +9,7 @@ services:
       NODE_ENV: production
       PORT: 3001
 
-      # DB from workflow -> .env على الـ VM
+      # من .env على الـVM (يكتبها الـWorkflow)
       DB_HOST: ${DB_HOST}
       DB_PORT: 1433
       DB_USER: ${DB_USER}
@@ -18,16 +18,22 @@ services:
       DB_ENCRYPT: "true"
       DB_TRUST_SERVER_CERTIFICATE: "false"
 
-      # App
+      # أسماء بديلة + سترنج اتصال صريح
+      DB_SERVER: ${DB_HOST}
+      SQL_SERVER: ${DB_HOST}
+      MSSQL_HOST: ${DB_HOST}
+      DATABASE_URL: "Server=${DB_HOST},1433;Database=${DB_NAME};User Id=${DB_USER};Password=${DB_PASSWORD};Encrypt=true;TrustServerCertificate=false;Connection Timeout=30;"
+
+      # إعدادات التطبيق
       JWT_EXPIRES_IN: 7d
       CORS_ORIGIN: "http://4.245.59.253"
 
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"]
-      interval: 30s
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 30s
 
   frontend:
     image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG:-latest}
@@ -37,7 +43,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost/health || exit 1"]
-      interval: 30s
+      interval: 20s
       timeout: 10s
-      retries: 3
-      start_period: 40s
+      retries: 5
+      start_period: 20s
