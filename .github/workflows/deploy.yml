@@ -16,7 +16,6 @@ env:
   VMSS_BE: vmss-backend-group4
   VMSS_FE: vmss-frontend-group4
   APP_DIR: /home/azureuser/ecommerce-app-three-tier-azure-db-ih
-  # <-- عدّل هذا فقط إذا ملفك ليس في الجذر
   COMPOSE_PATH_IN_REPO: docker-compose.yml
   BE_HEALTH_URL: http://127.0.0.1:3001/health
   FE_HEALTH_URL: http://127.0.0.1:3000/health
@@ -75,7 +74,6 @@ jobs:
           RAW="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/${COMPOSE_PATH_IN_REPO}"
           echo "RAW_URL=$RAW" | tee -a "$GITHUB_OUTPUT"
           echo "Using compose: $RAW"
-          # تأكيد أنه موجود (200 OK)
           curl -fsI "$RAW" >/dev/null || { echo "❌ Compose not found at $RAW"; exit 1; }
 
   deploy-backend:
@@ -95,10 +93,11 @@ jobs:
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
+
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_BE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_BE"; exit 0; }
 
-          read -r -d '' REMOTE <<'EOS'
+          REMOTE=$(cat <<'EOS'
           set -euxo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
@@ -120,23 +119,22 @@ jobs:
           printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
 
           az login --identity
-          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          TOKEN=\$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
           echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
-          # pull + hard recreate service
           docker compose --env-file .env pull backend || docker-compose --env-file .env pull backend
           docker rm -f ecommerce-backend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
 
-          # wait health
-          for i in $(seq 1 36); do
+          for i in \$(seq 1 36); do
             curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
             sleep 5
           done
           echo "Backend failed healthcheck"; docker ps --filter name=ecommerce-backend
-          docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
+          docker logs \$(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
           exit 1
           EOS
+          )
 
           REMOTE=${REMOTE//__APP_DIR__/$APP_DIR}
           REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
@@ -154,7 +152,7 @@ jobs:
 
   deploy-frontend:
     runs-on: ubuntu-latest
-    needs: [build, deploy-backend]   # نضمن ترتيب التنفيذ + إتاحة needs.build.outputs
+    needs: [build, deploy-backend]
     permissions: { id-token: write, contents: read }
     steps:
       - name: Azure login
@@ -169,10 +167,11 @@ jobs:
           TAG: ${{ needs.build.outputs.TAG }}
         run: |
           set -euo pipefail
+
           mapfile -t NAMES < <(az vmss list-instances -g "$RG" -n "$VMSS_FE" --query "[].name" -o tsv)
           [ ${#NAMES[@]} -gt 0 ] || { echo "No instances in $VMSS_FE"; exit 0; }
 
-          read -r -d '' REMOTE <<'EOS'
+          REMOTE=$(cat <<'EOS'
           set -euxo pipefail
           APP_DIR="__APP_DIR__"
           ACR_NAME="__ACR_NAME__"
@@ -193,15 +192,14 @@ jobs:
           printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
 
           az login --identity
-          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          TOKEN=\$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
           echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
           docker compose --env-file .env pull frontend || docker-compose --env-file .env pull frontend
           docker rm -f ecommerce-frontend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate frontend || docker-compose --env-file .env up -d --no-deps --force-recreate frontend
 
-          # wait and print proof
-          for i in $(seq 1 36); do
+          for i in \$(seq 1 36); do
             if curl -fsS "$HEALTH_URL" >/dev/null; then
               echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
               echo "--- css files ---"; ls -l /usr/share/nginx/html/static/css || true
@@ -212,9 +210,10 @@ jobs:
           done
           echo "Frontend failed healthcheck"
           docker ps --filter name=ecommerce-frontend
-          docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
+          docker logs \$(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
           exit 1
           EOS
+          )
 
           REMOTE=${REMOTE//__APP_DIR__/$APP_DIR}
           REMOTE=${REMOTE//__ACR_NAME__/$ACR_NAME}
@@ -235,7 +234,6 @@ jobs:
             VERS+=("$V")
           done
 
-          # لو لُوحظ اختلاف نسخة بين الـ VMs نفشل—هذا يمنع تذبذب النسخ
           if [ "$(printf '%s\n' "${VERS[@]}" | sort -u | wc -l)" -ne 1 ]; then
             echo "Detected mixed frontend versions across VMs: ${VERS[*]}"
             exit 1
