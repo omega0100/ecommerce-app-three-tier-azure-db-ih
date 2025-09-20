@@ -1,20 +1,25 @@
-version: "3.9"
-
 services:
   backend:
-    image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG}
+    image: ${ACR_LOGIN_SERVER}/ecommerce-backend:${IMAGE_TAG:-latest}
     container_name: ecommerce-backend
     ports:
       - "3001:3001"
-    env_file:
-      - ./ecommerce-app-backend/.env
     environment:
-      NODE_ENV: production
-      PORT: 3001
-      DB_ENCRYPT: "true"
-      DB_TRUST_SERVER_CERTIFICATE: "false"
-      JWT_EXPIRES_IN: 7d
-      CORS_ORIGIN: "http://4.245.59.253"
+      - NODE_ENV=production
+      - PORT=3001
+
+      # اتصال SQL (قيمها تجي من .env اللي نكتبه على الـVM)
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=1433
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_ENCRYPT=true
+      - DB_TRUST_SERVER_CERTIFICATE=false
+
+      # سيكورتي/كروص
+      - JWT_EXPIRES_IN=7d
+      - CORS_ORIGIN=http://4.245.59.253
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3001/health || exit 1"]
@@ -22,21 +27,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
-  frontend:
-    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG}
-    container_name: ecommerce-frontend
-    ports:
-      - "3000:80"
-    restart: unless-stopped
-    healthcheck:
-      # إن ما عندك /health، افحص index.html
-      test: ["CMD-SHELL", "curl -fsS http://localhost/index.html || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
-networks:
-  default:
-    name: ecommerce-network
