@@ -119,19 +119,19 @@ jobs:
           printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
 
           az login --identity
-          TOKEN=\$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
           echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
           docker compose --env-file .env pull backend || docker-compose --env-file .env pull backend
           docker rm -f ecommerce-backend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate backend || docker-compose --env-file .env up -d --no-deps --force-recreate backend
 
-          for i in \$(seq 1 36); do
+          for i in $(seq 1 36); do
             curl -fsS "$HEALTH_URL" >/dev/null && { echo "Backend healthy"; exit 0; }
             sleep 5
           done
           echo "Backend failed healthcheck"; docker ps --filter name=ecommerce-backend
-          docker logs \$(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
+          docker logs $(docker ps --filter name=ecommerce-backend -q) --tail 200 || true
           exit 1
           EOS
           )
@@ -192,14 +192,14 @@ jobs:
           printf "%s\n" "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" "IMAGE_TAG=$IMAGE_TAG" > .env
 
           az login --identity
-          TOKEN=\$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
+          TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
           echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
           docker compose --env-file .env pull frontend || docker-compose --env-file .env pull frontend
           docker rm -f ecommerce-frontend 2>/dev/null || true
           docker compose --env-file .env up -d --no-deps --force-recreate frontend || docker-compose --env-file .env up -d --no-deps --force-recreate frontend
 
-          for i in \$(seq 1 36); do
+          for i in $(seq 1 36); do
             if curl -fsS "$HEALTH_URL" >/dev/null; then
               echo -n "version: "; cat /usr/share/nginx/html/version.txt || echo no-version
               echo "--- css files ---"; ls -l /usr/share/nginx/html/static/css || true
@@ -210,7 +210,7 @@ jobs:
           done
           echo "Frontend failed healthcheck"
           docker ps --filter name=ecommerce-frontend
-          docker logs \$(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
+          docker logs $(docker ps --filter name=ecommerce-frontend -q) --tail 200 || true
           exit 1
           EOS
           )
