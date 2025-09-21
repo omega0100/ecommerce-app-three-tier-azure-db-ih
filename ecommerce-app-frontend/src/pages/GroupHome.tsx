@@ -11,7 +11,7 @@ export default function Group4ProjectPage() {
 
   const members = [
     { 
-      name: "YOUSEF", 
+      name: "Yousef", 
       role: "Team Lead", 
       color: "from-blue-500 via-cyan-500 to-teal-500", 
       icon: "👨‍💻", 
@@ -27,7 +27,7 @@ export default function Group4ProjectPage() {
       skills: ["DevOps", "Automation", "CI/CD"]
     },
     { 
-      name: "Dana", 
+      name: "Danah", 
       role: "UI/UX Designer", 
       color: "from-emerald-500 via-green-500 to-teal-500", 
       icon: "🎨", 
