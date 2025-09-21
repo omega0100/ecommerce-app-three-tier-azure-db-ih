@@ -19,7 +19,7 @@ export default function Group4ProjectPage() {
       skills: ["Leadership", "Azure", "Strategy"]
     },
     { 
-      name: "Abdullah", 
+      name: "Abdullah111", 
       role: "DevOps Engineer", 
       color: "from-purple-500 via-pink-500 to-rose-500", 
       icon: "🚀", 
