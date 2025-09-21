@@ -141,7 +141,7 @@ export default function Group4ProjectPage() {
               <div className="mb-16">
                 <h2 className="text-2xl text-white/80 uppercase tracking-wider font-medium mb-8">Our Team</h2>
                 <div className="flex flex-wrap justify-center gap-6 mb-10">
-                  {['YOUSEF', 'Abdullah', 'Dana'].map((name, index) => (
+                  {['Yousef', 'Abdullah', 'Danah'].map((name, index) => (
                     <div 
                       key={name}
                       className="group relative"
