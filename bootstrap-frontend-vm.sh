@@ -1,94 +1,77 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -euxo pipefail
 
+# مطلوب تمريرها من الإكستنشن (v.sh)
 APP_DIR="${APP_DIR:?missing APP_DIR}"
 ACR_NAME="${ACR_NAME:?missing ACR_NAME}"
 ACR_LOGIN_SERVER="${ACR_LOGIN_SERVER:?missing ACR_LOGIN_SERVER}"
-IMAGE_TAG="${IMAGE_TAG:?missing IMAGE_TAG}"
-FE_HEALTH_URL="${FE_HEALTH_URL:?missing FE_HEALTH_URL}"     # مثل: http://127.0.0.1:3000/health
-BACKEND_ORIGIN="${BACKEND_ORIGIN:?missing BACKEND_ORIGIN}"   # مثل: http://10.0.4.5:3001
+RAW_URL="${RAW_URL:?missing RAW_URL}"        # رابط compose للفرونت فقط
+IMAGE_TAG="${IMAGE_TAG:?missing IMAGE_TAG}"  # تاك موجود في ACR
+FE_HEALTH_URL="${FE_HEALTH_URL:?missing FE_HEALTH_URL}"  # مثال: http://127.0.0.1:3000/health
 
-# Docker + Compose
+# 0) Docker + Compose
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
   sudo systemctl enable --now docker
 fi
-
-COMPOSE_BIN=""
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE_BIN="docker compose"
-else
-  if ! command -v docker-compose >/dev/null 2>&1; then
-    sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-    sudo chmod +x /usr/local/bin/docker-compose
-  fi
-  COMPOSE_BIN="docker-compose"
+if ! docker compose version >/dev/null 2>&1; then
+  sudo curl -fsSL "https://github.com/docker/compose/releases/download/2.29.7/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose || true
 fi
 
-# تحضير مجلد التطبيق
+# 1) مجلد التطبيق + تحميل compose
 mkdir -p "$APP_DIR" && cd "$APP_DIR"
+curl -fsSL "$RAW_URL" -o docker-compose.yml
 
-# Compose خاص بالفرونت فقط
-cat > docker-compose.frontend.yml <<'YML'
-name: ecommerce
-services:
-  frontend:
-    image: ${ACR_LOGIN_SERVER}/ecommerce-frontend:${IMAGE_TAG}
-    container_name: ecommerce-frontend
-    ports:
-      - "3000:80"
-    restart: unless-stopped
-    volumes:
-      - ./nginx.default.conf:/etc/nginx/conf.d/default.conf:ro
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost/health || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
-YML
-
-# NGINX بدون أي allowlist للـIPs
+# 2) ملف nginx (static فقط – بدون أي allowlist أو proxy)
 cat > nginx.default.conf <<'CONF'
-map $http_upgrade $connection_upgrade {
-  default upgrade;
-  ''      close;
-}
 server {
   listen 80;
   server_name _;
+  root /usr/share/nginx/html;
+  index index.html;
 
-  # Health مفتوح للجميع
-  location = /health {
-    default_type application/json;
-    add_header Cache-Control "no-store";
-    return 200 '{"status":"OK"}';
+  add_header X-Frame-Options "SAMEORIGIN" always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header X-XSS-Protection "1; mode=block" always;
+  add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+  # لا كاش لقالب الـSPA
+  location = /index.html {
+    add_header Cache-Control "no-store, max-age=0" always;
+    try_files $uri =404;
   }
 
-  # ملفات الواجهة
-  root /usr/share/nginx/html;
-  try_files $uri $uri/ /index.html;
+  # الـSPA fallback
+  location / {
+    add_header Cache-Control "no-store, max-age=0" always;
+    try_files $uri $uri/ /index.html;
+  }
 
-  # بروكسي للباك إند تحت /api/
-  location /api/ {
-    proxy_pass __BACKEND_ORIGIN__/;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection $connection_upgrade;
-    proxy_read_timeout 60s;
+  # كاش طويل للأصول المجمّلة
+  location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+    expires 1y;
+    add_header Cache-Control "public, immutable";
+    try_files $uri =404;
+  }
+
+  # الصحة
+  location = /health {
+    access_log off;
+    default_type text/plain;
+    return 200 "healthy\n";
   }
 }
 CONF
-sed -i "s#__BACKEND_ORIGIN__#${BACKEND_ORIGIN}#g" nginx.default.conf
 
-# .env للسحب من ACR
-printf "ACR_LOGIN_SERVER=%s\nIMAGE_TAG=%s\n" "$ACR_LOGIN_SERVER" "$IMAGE_TAG" > .env
-echo "--- .env (safe) ---"
+# 3) .env لسحب الصورة من ACR فقط
+{
+  echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER"
+  echo "IMAGE_TAG=$IMAGE_TAG"
+} > .env
 grep -E '^(ACR_LOGIN_SERVER|IMAGE_TAG)=' .env || true
 
-# Azure CLI + ACR login بهوية الـVM
+# 4) az + ACR login بهوية الـVM
 if ! command -v az >/dev/null 2>&1; then
   curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
 fi
@@ -96,15 +79,16 @@ az login --identity >/dev/null
 TOKEN=$(az acr login -n "$ACR_NAME" --expose-token --query accessToken -o tsv)
 echo "$TOKEN" | docker login "$ACR_LOGIN_SERVER" -u 00000000-0000-0000-0000-000000000000 --password-stdin
 
-# نشر الفرونت فقط (بدون fallback خاطئ)
-$COMPOSE_BIN --env-file .env -f docker-compose.frontend.yml pull frontend
+# 5) تشغيل خدمة الفرونت فقط
+docker compose --env-file .env pull frontend || docker-compose --env-file .env pull frontend
 docker rm -f ecommerce-frontend 2>/dev/null || true
-$COMPOSE_BIN --env-file .env -f docker-compose.frontend.yml up -d --no-deps --force-recreate frontend
+docker compose --env-file .env up -d --no-deps --force-recreate frontend || docker-compose --env-file .env up -d --no-deps --force-recreate frontend
 
-# Health gate
+# 6) Health gate
 for i in $(seq 1 36); do
   if curl -fsS "$FE_HEALTH_URL" >/dev/null; then
-    echo "Frontend healthy"; exit 0
+    echo "Frontend healthy"
+    exit 0
   fi
   sleep 5
 done
